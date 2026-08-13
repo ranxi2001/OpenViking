@@ -65,7 +65,7 @@ class VolcEngineVLM(OpenAIVLM):
         choice = response.choices[0]
         message = choice.message
         if hasattr(message, "tool_calls") and message.tool_calls:
-            tracer.info(f"message.tool_calls={message.tool_calls}")
+            tracer.info(f"message.tool_calls={message.tool_calls}", contains_content=True)
         if has_tools:
             usage = {}
             if hasattr(response, "usage") and response.usage:
@@ -149,6 +149,7 @@ class VolcEngineVLM(OpenAIVLM):
             media_type=media_type,
         )
 
+    @tracer("volcengine.vlm.call", ignore_result=True, ignore_args=True)
     def get_completion(
         self,
         prompt: str = "",
@@ -174,16 +175,24 @@ class VolcEngineVLM(OpenAIVLM):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         client = self.get_client()
-        t0 = time.perf_counter()
-        response = client.chat.completions.create(**kwargs)
-        elapsed = time.perf_counter() - t0
-        self._update_token_usage_from_response(response, duration_seconds=elapsed)
-        result = self._build_vlm_response(response, has_tools=bool(tools))
-        if tools:
+        response = None
+        try:
+            t0 = time.perf_counter()
+            response = client.chat.completions.create(**kwargs)
+            elapsed = time.perf_counter() - t0
+            self._update_token_usage_from_response(
+                response, duration_seconds=elapsed, record_event=False
+            )
+            result = self._build_vlm_response(response, has_tools=bool(tools))
+            if not tools:
+                result = self._clean_response(str(result))
+            self._record_inference_event(response, request=kwargs)
             return result
-        return self._clean_response(str(result))
+        except Exception as e:
+            self._record_inference_event(response, error=e, request=kwargs)
+            raise
 
-    @tracer("volcengine.vlm.call", ignore_result=True, ignore_args=["messages"])
+    @tracer("volcengine.vlm.call", ignore_result=True, ignore_args=True)
     async def get_completion_async(
         self,
         prompt: str = "",
@@ -208,38 +217,45 @@ class VolcEngineVLM(OpenAIVLM):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
 
-        # 用 tracer.info 打印请求
         tracer.info(
             "request: "
-            f"{json.dumps(redact_image_data_urls(kwargs_messages), ensure_ascii=False, indent=2)}"
+            f"{json.dumps(redact_image_data_urls(kwargs_messages), ensure_ascii=False, indent=2)}",
+            contains_content=True,
         )
         if tools:
             tracer.info(
-                f"tools: {json.dumps([t['function']['name'] for t in tools], ensure_ascii=False)}"
+                f"tools: {json.dumps([t['function']['name'] for t in tools], ensure_ascii=False)}",
+                contains_content=True,
             )
 
         client = self.get_async_client()
 
         last_error = None
+        last_response = None
         for attempt in range(self.max_retries + 1):
             try:
+                last_response = None
                 t0 = time.perf_counter()
                 response = await client.chat.completions.create(**kwargs)
+                last_response = response
                 elapsed = time.perf_counter() - t0
-                self._update_token_usage_from_response(response, duration_seconds=elapsed)
+                self._update_token_usage_from_response(
+                    response, duration_seconds=elapsed, record_event=False
+                )
                 result = self._build_vlm_response(response, has_tools=bool(tools))
-                if tools:
-                    return result
-                content = self._clean_response(str(result))
-                if content:
-                    tracer.info(f"message.content={content}")
-                return content
+                if not tools:
+                    result = self._clean_response(str(result))
+                    if result:
+                        tracer.info(f"message.content={result}", contains_content=True)
+                self._record_inference_event(response, request=kwargs)
+                return result
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
                     await asyncio.sleep(2**attempt)
 
         if last_error:
+            self._record_inference_event(last_response, error=last_error, request=kwargs)
             raise last_error
         else:
             raise RuntimeError("Unknown error in async completion")
@@ -358,6 +374,7 @@ class VolcEngineVLM(OpenAIVLM):
         else:
             return {"type": "image_url", "image_url": {"url": image}}
 
+    @tracer("volcengine.vlm.call", ignore_result=True, ignore_args=True)
     def get_vision_completion(
         self,
         prompt: str = "",
@@ -393,15 +410,24 @@ class VolcEngineVLM(OpenAIVLM):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         client = self.get_client()
-        t0 = time.perf_counter()
-        response = client.chat.completions.create(**kwargs)
-        elapsed = time.perf_counter() - t0
-        self._update_token_usage_from_response(response, duration_seconds=elapsed)
-        result = self._build_vlm_response(response, has_tools=bool(tools))
-        if tools:
+        response = None
+        try:
+            t0 = time.perf_counter()
+            response = client.chat.completions.create(**kwargs)
+            elapsed = time.perf_counter() - t0
+            self._update_token_usage_from_response(
+                response, duration_seconds=elapsed, record_event=False
+            )
+            result = self._build_vlm_response(response, has_tools=bool(tools))
+            if not tools:
+                result = self._clean_response(str(result))
+            self._record_inference_event(response, request=kwargs)
             return result
-        return self._clean_response(str(result))
+        except Exception as e:
+            self._record_inference_event(response, error=e, request=kwargs)
+            raise
 
+    @tracer("volcengine.vlm.call", ignore_result=True, ignore_args=True)
     async def get_vision_completion_async(
         self,
         prompt: str = "",
@@ -437,11 +463,19 @@ class VolcEngineVLM(OpenAIVLM):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         client = self.get_async_client()
-        t0 = time.perf_counter()
-        response = await client.chat.completions.create(**kwargs)
-        elapsed = time.perf_counter() - t0
-        self._update_token_usage_from_response(response, duration_seconds=elapsed)
-        result = self._build_vlm_response(response, has_tools=bool(tools))
-        if tools:
+        response = None
+        try:
+            t0 = time.perf_counter()
+            response = await client.chat.completions.create(**kwargs)
+            elapsed = time.perf_counter() - t0
+            self._update_token_usage_from_response(
+                response, duration_seconds=elapsed, record_event=False
+            )
+            result = self._build_vlm_response(response, has_tools=bool(tools))
+            if not tools:
+                result = self._clean_response(str(result))
+            self._record_inference_event(response, request=kwargs)
             return result
-        return self._clean_response(str(result))
+        except Exception as e:
+            self._record_inference_event(response, error=e, request=kwargs)
+            raise

@@ -150,7 +150,7 @@ async def write_stored_links(
             )
             updated_uris.append(uri)
         except Exception as e:
-            tracer.error(f"Failed to apply links to {uri}: {e}")
+            tracer.error(f"Failed to apply links to {uri}: {e}", e, contains_content=True)
     return updated_uris
 
 
@@ -861,7 +861,10 @@ class MemoryUpdater:
             raise ValueError("MemoryTypeRegistry is required for URI resolution")
 
         # Resolve all URIs first (pass extract_context for template rendering)
-        tracer.info(f"[MemoryUpdater] applying operations, isolation_handler={isolation_handler}")
+        tracer.info(
+            f"[MemoryUpdater] applying operations, isolation_handler={isolation_handler}",
+            contains_content=True,
+        )
 
         if operations.has_errors():
             for error in operations.errors:
@@ -905,6 +908,11 @@ class MemoryUpdater:
                 tracer.error(
                     f"Failed to apply operation: op_type={type(resolved_op).__name__}, uris={resolved_op.uris}",
                     e,
+                    contains_content=True,
+                    attributes={
+                        "openviking.memory.operation_type": type(resolved_op).__name__,
+                        "openviking.memory.uri_count": len(resolved_op.uris),
+                    },
                 )
                 for uri in resolved_op.uris:
                     result.add_error(uri, e)
@@ -933,25 +941,31 @@ class MemoryUpdater:
                     "Skipped delete because batch contains unresolved upsert URIs"
                 )
                 result.add_error(delete_uri, delete_error)
-                tracer.error(f"Skipping delete for {delete_uri}: {delete_error}")
+                tracer.error(
+                    f"Skipping delete for {delete_uri}: {delete_error}",
+                    delete_error,
+                    contains_content=True,
+                )
                 continue
             if delete_uri in upserted_uris:
                 tracer.info(
                     f"[apply_operations] skipping delete for {delete_uri}: "
-                    "URI was upserted in the same batch (Replace-with-same-name treated as Update)"
+                    "URI was upserted in the same batch (Replace-with-same-name treated as Update)",
+                    contains_content=True,
                 )
                 continue
             if _same_batch_delete_conflict_key(delete_uri) in upserted_uri_keys:
                 tracer.info(
                     f"[apply_operations] skipping delete for {delete_uri}: "
-                    "URI case-conflicts with an upserted URI in the same batch"
+                    "URI case-conflicts with an upserted URI in the same batch",
+                    contains_content=True,
                 )
                 continue
             try:
                 await self._apply_delete(delete_uri, ctx, lease_ref=self._transaction_handle)
                 result.add_deleted(delete_uri)
             except Exception as e:
-                tracer.error(f"Failed to delete memory {delete_uri}", e)
+                tracer.error(f"Failed to delete memory {delete_uri}", e, contains_content=True)
                 result.add_error(delete_uri, e)
 
         await self._sync_resource_refs_for_result(result, ctx, lease_ref=self._transaction_handle)
@@ -963,9 +977,7 @@ class MemoryUpdater:
                 uri_memory_type_map[uri] = op.memory_type
         # Merge caller-supplied transient tags with per-operation search_tags
         # (e.g. event-memory custom scalars) so both reach vectorization.
-        effective_search_tags_by_uri = _collect_search_tags_by_uri(
-            operations, search_tags_by_uri
-        )
+        effective_search_tags_by_uri = _collect_search_tags_by_uri(operations, search_tags_by_uri)
         await self._vectorize_memories(
             result,
             ctx,
@@ -1099,7 +1111,12 @@ class MemoryUpdater:
                         new_value = await merge_op.apply(current_value, patch_value)
                     except Exception as e:
                         tracer.info(
-                            f"[memory_updater] Skipping field update after merge_op failure: uri={uri}, field={field.name}, error={e}"
+                            f"[memory_updater] Skipping field update after merge_op failure: uri={uri}, field={field.name}, error={e}",
+                            contains_content=True,
+                            attributes={
+                                "openviking.memory.field": field.name,
+                                "error.type": f"{type(e).__module__}.{type(e).__qualname__}",
+                            },
                         )
                         if current_value is None:
                             metadata.pop(field.name, None)
@@ -1251,7 +1268,9 @@ class MemoryUpdater:
                 content = await viking_fs.read_file(deleted_uri, ctx=ctx)
             except Exception as e:
                 tracer.error(
-                    f"Failed to read deleted memory links for replacement {deleted_uri}: {e}"
+                    f"Failed to read deleted memory links for replacement {deleted_uri}: {e}",
+                    e,
+                    contains_content=True,
                 )
                 continue
             if not content:
@@ -1328,7 +1347,11 @@ class MemoryUpdater:
                 )
                 result.add_edited(uri)
             except Exception as e:
-                tracer.error(f"Failed to inherit deleted memory links for {uri}: {e}")
+                tracer.error(
+                    f"Failed to inherit deleted memory links for {uri}: {e}",
+                    e,
+                    contains_content=True,
+                )
 
     async def _apply_delete(
         self,
@@ -1344,7 +1367,7 @@ class MemoryUpdater:
         try:
             await viking_fs.rm(uri, recursive=False, ctx=ctx, lease_ref=lease_ref)
         except NotFoundError:
-            tracer.error(f"Memory not found for delete: {uri}")
+            tracer.error(f"Memory not found for delete: {uri}", contains_content=True)
             # Idempotent - deleting non-existent file succeeds
 
     async def _vectorize_memories(
@@ -1480,7 +1503,7 @@ class MemoryUpdater:
                     logger.debug(f"Enqueued memory for vectorization: {uri}")
 
             except Exception as e:
-                tracer.error(f"Failed to vectorize memory {uri}: {e}")
+                tracer.error(f"Failed to vectorize memory {uri}: {e}", e, contains_content=True)
         return attempted_count
 
     @staticmethod
@@ -1540,7 +1563,7 @@ class MemoryUpdater:
             logger.debug("Skip overview generation for deleted directory: %s", directory)
             return
         except Exception as e:
-            tracer.error(f"Failed to list files in {directory}: {e}")
+            tracer.error(f"Failed to list files in {directory}: {e}", e, contains_content=True)
             return
 
         # If no memory files, delete the .overview.md and the directory if empty
@@ -1589,7 +1612,7 @@ class MemoryUpdater:
                     }
                 )
             except Exception as e:
-                tracer.error(f"Failed to parse {file_path}: {e}")
+                tracer.error(f"Failed to parse {file_path}: {e}", e, contains_content=True)
                 continue
 
         if not items:
@@ -1610,7 +1633,11 @@ class MemoryUpdater:
                 extract_context=extract_context,
             )
         except Exception as e:
-            tracer.error(f"Failed to render overview template for {memory_type}: {e}")
+            tracer.error(
+                f"Failed to render overview template for {memory_type}: {e}",
+                e,
+                contains_content=True,
+            )
             return
 
         # Write .overview.md to the directory
@@ -1623,4 +1650,4 @@ class MemoryUpdater:
                 lease_ref=lease_ref,
             )
         except Exception as e:
-            tracer.error(f"Failed to write overview {overview_path}: {e}")
+            tracer.error(f"Failed to write overview {overview_path}: {e}", e, contains_content=True)

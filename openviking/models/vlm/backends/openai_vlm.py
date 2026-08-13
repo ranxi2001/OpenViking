@@ -154,6 +154,8 @@ class OpenAIVLM(VLMBase):
         self,
         response,
         duration_seconds: float = 0.0,
+        *,
+        record_event: bool = True,
     ):
         if hasattr(response, "usage") and response.usage:
             tracer.info(f"response.usage={response.usage}")
@@ -174,6 +176,8 @@ class OpenAIVLM(VLMBase):
                 prompt_cached_tokens=prompt_cached_tokens,
                 completion_reasoning_tokens=completion_reasoning_tokens,
             )
+        if record_event:
+            self._record_inference_event(response)
         return
 
     def _parse_tool_calls(self, message) -> List[ToolCall]:
@@ -197,7 +201,7 @@ class OpenAIVLM(VLMBase):
 
         choice = response.choices[0]
         message = choice.message
-        tracer.info(f"result={message.content}")
+        tracer.info(f"result={message.content}", contains_content=True)
         if has_tools:
             usage = {}
             if hasattr(response, "usage") and response.usage:
@@ -282,16 +286,24 @@ class OpenAIVLM(VLMBase):
             kwargs["tool_choice"] = tool_choice or "auto"
         return kwargs
 
-    def _extract_completion_content(self, response, elapsed: float) -> str:
-        self._update_token_usage_from_response(response, duration_seconds=elapsed)
+    def _extract_completion_content(
+        self, response, elapsed: float, *, record_event: bool = True
+    ) -> str:
+        self._update_token_usage_from_response(
+            response, duration_seconds=elapsed, record_event=False
+        )
         content = self._extract_content_from_response(response)
-        return self._clean_response(content)
+        result = self._clean_response(content)
+        if record_event:
+            self._record_inference_event(response)
+        return result
 
-    async def _extract_completion_content_async(self, response, elapsed: float) -> str:
-        self._update_token_usage_from_response(response, duration_seconds=elapsed)
-        content = self._extract_content_from_response(response)
-        return self._clean_response(content)
+    async def _extract_completion_content_async(
+        self, response, elapsed: float, *, record_event: bool = True
+    ) -> str:
+        return self._extract_completion_content(response, elapsed, record_event=record_event)
 
+    @tracer("openai.vlm.call", ignore_result=True, ignore_args=True)
     def get_completion(
         self,
         prompt: str = "",
@@ -304,24 +316,38 @@ class OpenAIVLM(VLMBase):
         effective_thinking = self.thinking if thinking is None else thinking
         client = self.get_client()
         kwargs = self._build_text_kwargs(prompt, tools, tool_choice, messages, effective_thinking)
+        last_response = None
 
         def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = client.chat.completions.create(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
             if tools is not None:
-                self._update_token_usage_from_response(response, duration_seconds=elapsed)
-                return self._build_vlm_response(response, has_tools=True)
-            return self._extract_completion_content(response, elapsed)
+                self._update_token_usage_from_response(
+                    response, duration_seconds=elapsed, record_event=False
+                )
+                result = self._build_vlm_response(response, has_tools=True)
+                self._record_inference_event(response, request=kwargs)
+                return result
+            result = self._extract_completion_content(response, elapsed, record_event=False)
+            self._record_inference_event(response, request=kwargs)
+            return result
 
-        return retry_sync(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="OpenAI VLM completion",
-        )
+        try:
+            return retry_sync(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="OpenAI VLM completion",
+            )
+        except Exception as e:
+            self._record_inference_event(last_response, error=e, request=kwargs)
+            raise
 
-    @tracer("openai.vlm.call", ignore_result=True, ignore_args=["messages"])
+    @tracer("openai.vlm.call", ignore_result=True, ignore_args=True)
     async def get_completion_async(
         self,
         prompt: str = "",
@@ -334,27 +360,43 @@ class OpenAIVLM(VLMBase):
         effective_thinking = self.thinking if thinking is None else thinking
         client = self.get_async_client()
         kwargs = self._build_text_kwargs(prompt, tools, tool_choice, messages, effective_thinking)
+        last_response = None
 
         async def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = await client.chat.completions.create(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
             if tools is not None:
-                self._update_token_usage_from_response(response, duration_seconds=elapsed)
-                return self._build_vlm_response(response, has_tools=True)
-            return await self._extract_completion_content_async(response, elapsed)
+                self._update_token_usage_from_response(
+                    response, duration_seconds=elapsed, record_event=False
+                )
+                result = self._build_vlm_response(response, has_tools=True)
+                self._record_inference_event(response, request=kwargs)
+                return result
+            result = await self._extract_completion_content_async(
+                response, elapsed, record_event=False
+            )
+            self._record_inference_event(response, request=kwargs)
+            return result
 
-        # 用 tracer.info 打印请求
         tracer.info(
-            f"messages={json.dumps(redact_image_data_urls(kwargs), ensure_ascii=False, indent=2)}"
+            f"messages={json.dumps(redact_image_data_urls(kwargs), ensure_ascii=False, indent=2)}",
+            contains_content=True,
         )
 
-        return await retry_async(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="OpenAI VLM async completion",
-        )
+        try:
+            return await retry_async(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="OpenAI VLM async completion",
+            )
+        except Exception as e:
+            self._record_inference_event(last_response, error=e, request=kwargs)
+            raise
 
     def _detect_image_format(self, data: bytes) -> str:
         """Detect image format from magic bytes.
@@ -407,6 +449,7 @@ class OpenAIVLM(VLMBase):
             }
         return {"type": "image_url", "image_url": {"url": image}}
 
+    @tracer("openai.vlm.call", ignore_result=True, ignore_args=True)
     def get_vision_completion(
         self,
         prompt: str = "",
@@ -422,23 +465,38 @@ class OpenAIVLM(VLMBase):
         kwargs = self._build_vision_kwargs(
             prompt, images, tools, tool_choice, messages, effective_thinking
         )
+        last_response = None
 
         def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = client.chat.completions.create(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
             if tools is not None:
-                self._update_token_usage_from_response(response, duration_seconds=elapsed)
-                return self._build_vlm_response(response, has_tools=True)
-            return self._extract_completion_content(response, elapsed)
+                self._update_token_usage_from_response(
+                    response, duration_seconds=elapsed, record_event=False
+                )
+                result = self._build_vlm_response(response, has_tools=True)
+                self._record_inference_event(response, request=kwargs)
+                return result
+            result = self._extract_completion_content(response, elapsed, record_event=False)
+            self._record_inference_event(response, request=kwargs)
+            return result
 
-        return retry_sync(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="OpenAI VLM vision completion",
-        )
+        try:
+            return retry_sync(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="OpenAI VLM vision completion",
+            )
+        except Exception as e:
+            self._record_inference_event(last_response, error=e, request=kwargs)
+            raise
 
+    @tracer("openai.vlm.call", ignore_result=True, ignore_args=True)
     async def get_vision_completion_async(
         self,
         prompt: str = "",
@@ -454,19 +512,35 @@ class OpenAIVLM(VLMBase):
         kwargs = self._build_vision_kwargs(
             prompt, images, tools, tool_choice, messages, effective_thinking
         )
+        last_response = None
 
         async def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = await client.chat.completions.create(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
             if tools is not None:
-                self._update_token_usage_from_response(response, duration_seconds=elapsed)
-                return self._build_vlm_response(response, has_tools=True)
-            return await self._extract_completion_content_async(response, elapsed)
+                self._update_token_usage_from_response(
+                    response, duration_seconds=elapsed, record_event=False
+                )
+                result = self._build_vlm_response(response, has_tools=True)
+                self._record_inference_event(response, request=kwargs)
+                return result
+            result = await self._extract_completion_content_async(
+                response, elapsed, record_event=False
+            )
+            self._record_inference_event(response, request=kwargs)
+            return result
 
-        return await retry_async(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="OpenAI VLM async vision completion",
-        )
+        try:
+            return await retry_async(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="OpenAI VLM async vision completion",
+            )
+        except Exception as e:
+            self._record_inference_event(last_response, error=e, request=kwargs)
+            raise

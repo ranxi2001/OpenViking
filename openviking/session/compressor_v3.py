@@ -585,7 +585,8 @@ class SessionCompressorV3:
             )
         tracer.info(
             "Training CaseSpec fast path wrote case memory: "
-            f"case={case.name} uri={uri} written={result.written_uris} edited={result.edited_uris}"
+            f"case={case.name} uri={uri} written={result.written_uris} edited={result.edited_uris}",
+            contains_content=True,
         )
         return _V3AppliedMemory(result=result, operations=operations, memory_diff=memory_diff)
 
@@ -1489,12 +1490,26 @@ async def _case_from_persisted_memory_file(
     try:
         raw = await viking_fs.read_file(uri, ctx=ctx)
     except Exception as exc:
-        tracer.info(f"Failed to read canonical case memory for training {uri}: {exc}")
+        tracer.info(
+            f"Failed to read canonical case memory for training {uri}: {exc}",
+            contains_content=True,
+            attributes={
+                "openviking.train.operation": "read_case_memory",
+                "error.type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+            },
+        )
         return None
     try:
         memory_file = MemoryFileUtils.read(raw or "", uri=uri)
     except Exception as exc:
-        tracer.info(f"Failed to parse canonical case memory for training {uri}: {exc}")
+        tracer.info(
+            f"Failed to parse canonical case memory for training {uri}: {exc}",
+            contains_content=True,
+            attributes={
+                "openviking.train.operation": "parse_case_memory",
+                "error.type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+            },
+        )
         return None
     return _memory_file_to_case(memory_file)
 
@@ -1946,7 +1961,12 @@ async def _render_case_links_from_template(
     try:
         raw = await viking_fs.read_file(case_uri, ctx=ctx)
     except Exception as exc:
-        tracer.error(f"Failed to read case memory for link rendering {case_uri}: {exc}")
+        tracer.error(
+            f"Failed to read case memory for link rendering {case_uri}: {exc}",
+            exc,
+            contains_content=True,
+            attributes={"openviking.train.operation": "render_case_links"},
+        )
         return
 
     mf = MemoryFileUtils.read(raw or "", uri=case_uri)

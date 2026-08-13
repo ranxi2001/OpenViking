@@ -194,7 +194,14 @@ class MemoryGraph:
         html = _render_graph_html(nodes, edges)
         try:
             await viking_fs.write_file(output_uri, html, ctx=ctx)
-            tracer.info(f"[build_graph] Generated graph: {output_uri}")
+            tracer.info(
+                f"[build_graph] Generated graph: {output_uri}",
+                contains_content=True,
+                attributes={
+                    "openviking.graph.node_count": len(nodes),
+                    "openviking.graph.edge_count": len(edges),
+                },
+            )
         except Exception as e:
             logger.error(f"Failed to write graph {output_uri}: {e}")
             raise

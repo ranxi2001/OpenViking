@@ -413,12 +413,15 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
             result = await read_tool.execute(self.create_tool_context(), uri=uri)
             if isinstance(result, dict) and "error" in result:
                 if not self._is_expected_read_not_found(result["error"]):
-                    tracer.info(f"Failed to read {uri}: {result['error']}")
+                    tracer.info(
+                        f"Failed to read {uri}: {result['error']}",
+                        contains_content=True,
+                    )
                 return None
             return result
         except Exception as e:
             if not self._is_expected_read_not_found(e):
-                tracer.error(f"Failed to read {uri}: {e}")
+                tracer.error(f"Failed to read {uri}: {e}", e, contains_content=True)
             return None
 
     async def search_files(
@@ -441,7 +444,7 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
                 return [m.get("uri", "") for m in result.get("memories", []) if m.get("uri")]
             return []
         except Exception as e:
-            tracer.error(f"Failed to search: {e}")
+            tracer.error(f"Failed to search: {e}", e, contains_content=True)
             return []
 
     async def _append_structured_read_result(
@@ -595,7 +598,7 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
             and self._is_expected_read_not_found(result["error"])
         )
         if not is_expected_read_not_found:
-            tracer.info(f"tool_call.arguments={tool_call.arguments}")
+            tracer.info(f"tool_call.arguments={tool_call.arguments}", contains_content=True)
         return result
 
     def get_tools(self) -> List[str]:

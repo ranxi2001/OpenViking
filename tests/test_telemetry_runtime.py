@@ -496,6 +496,7 @@ def test_cuvs_telemetry_distinguishes_zero_memory_from_unobserved_memory():
 
 def test_init_tracer_forwards_headers_to_grpc_exporter(monkeypatch):
     captured = {}
+    global_provider = {}
 
     class FakeExporter:
         def __init__(self, **kwargs):
@@ -511,7 +512,12 @@ def test_init_tracer_forwards_headers_to_grpc_exporter(monkeypatch):
         def add_span_processor(self, _processor):
             return None
 
+        def get_tracer(self, service_name):
+            return f"tracer:{service_name}"
+
     monkeypatch.setattr(tracer_module, "TracerProvider", FakeTracerProvider)
+    monkeypatch.setattr(tracer_module, "_delegating_trace_provider", None)
+    monkeypatch.setattr(tracer_module, "_owned_trace_provider", None)
     monkeypatch.setattr(
         tracer_module,
         "Resource",
@@ -521,8 +527,8 @@ def test_init_tracer_forwards_headers_to_grpc_exporter(monkeypatch):
         tracer_module,
         "otel_trace",
         SimpleNamespace(
-            set_tracer_provider=lambda _provider: None,
-            get_tracer=lambda service_name: f"tracer:{service_name}",
+            set_tracer_provider=lambda provider: global_provider.setdefault("provider", provider),
+            get_tracer_provider=lambda: global_provider.get("provider"),
         ),
     )
     monkeypatch.setattr(
@@ -533,7 +539,7 @@ def test_init_tracer_forwards_headers_to_grpc_exporter(monkeypatch):
     monkeypatch.setattr(tracer_module, "_setup_logging", lambda: None)
     monkeypatch.setattr(tracer_module, "_init_asyncio_instrumentation", lambda: None)
 
-    tracer_module.init_tracer(
+    result = tracer_module.init_tracer(
         endpoint="apmplus-cn-beijing.ivolces.com:4317",
         service_name="memorydb",
         protocol="grpc",
@@ -545,10 +551,12 @@ def test_init_tracer_forwards_headers_to_grpc_exporter(monkeypatch):
     assert captured["endpoint"] == "apmplus-cn-beijing.ivolces.com:4317"
     assert captured["insecure"] is True
     assert captured["headers"] == {"x-byteapm-appkey": "trace-appkey"}
+    assert result is not None
 
 
 def test_init_tracer_forwards_headers_to_http_exporter(monkeypatch):
     captured = {}
+    global_provider = {}
 
     class FakeExporter:
         def __init__(self, **kwargs):
@@ -564,7 +572,12 @@ def test_init_tracer_forwards_headers_to_http_exporter(monkeypatch):
         def add_span_processor(self, _processor):
             return None
 
+        def get_tracer(self, service_name):
+            return f"tracer:{service_name}"
+
     monkeypatch.setattr(tracer_module, "TracerProvider", FakeTracerProvider)
+    monkeypatch.setattr(tracer_module, "_delegating_trace_provider", None)
+    monkeypatch.setattr(tracer_module, "_owned_trace_provider", None)
     monkeypatch.setattr(
         tracer_module,
         "Resource",
@@ -574,8 +587,8 @@ def test_init_tracer_forwards_headers_to_http_exporter(monkeypatch):
         tracer_module,
         "otel_trace",
         SimpleNamespace(
-            set_tracer_provider=lambda _provider: None,
-            get_tracer=lambda service_name: f"tracer:{service_name}",
+            set_tracer_provider=lambda provider: global_provider.setdefault("provider", provider),
+            get_tracer_provider=lambda: global_provider.get("provider"),
         ),
     )
     monkeypatch.setattr(
@@ -586,7 +599,7 @@ def test_init_tracer_forwards_headers_to_http_exporter(monkeypatch):
     monkeypatch.setattr(tracer_module, "_setup_logging", lambda: None)
     monkeypatch.setattr(tracer_module, "_init_asyncio_instrumentation", lambda: None)
 
-    tracer_module.init_tracer(
+    result = tracer_module.init_tracer(
         endpoint="https://apmplus-cn-beijing.ivolces.com/api/otlp/v1/traces",
         service_name="memorydb",
         protocol="http",
@@ -596,6 +609,7 @@ def test_init_tracer_forwards_headers_to_http_exporter(monkeypatch):
 
     assert captured["endpoint"] == "https://apmplus-cn-beijing.ivolces.com/api/otlp/v1/traces"
     assert captured["headers"] == {"X-ByteAPM-AppKey": "trace-appkey"}
+    assert result is not None
 
 
 def test_init_otel_log_handler_forwards_headers_to_grpc_exporter(monkeypatch):

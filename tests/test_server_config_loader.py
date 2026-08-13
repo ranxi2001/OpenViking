@@ -293,3 +293,70 @@ def test_load_server_config_trace_local_defaults(tmp_path):
     assert traces.local_path == "~/.openviking/logs/traces.jsonl"
     assert traces.local_rotation_mb == 40
     assert traces.local_backup_count == 2
+    assert traces.capture_content is False
+    assert traces.content_max_length == 4096
+
+
+def test_load_server_config_trace_content_capture_override(tmp_path):
+    config_path = tmp_path / "ov.conf"
+    config_path.write_text(
+        json.dumps(
+            {
+                "server": {
+                    "observability": {
+                        "traces": {
+                            "enabled": True,
+                            "protocol": "local",
+                            "capture_content": True,
+                            "content_max_length": 2048,
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+    traces = load_server_config(str(config_path)).observability.traces
+
+    assert traces.capture_content is True
+    assert traces.content_max_length == 2048
+
+
+@pytest.mark.parametrize("content_max_length", [0, -1, 65_537])
+def test_load_server_config_rejects_invalid_trace_content_limit(tmp_path, content_max_length):
+    config_path = tmp_path / "ov.conf"
+    config_path.write_text(
+        json.dumps(
+            {
+                "server": {
+                    "observability": {
+                        "traces": {"content_max_length": content_max_length},
+                    }
+                }
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match=r"observability\.traces\.content_max_length"):
+        load_server_config(str(config_path))
+
+
+def test_trace_content_fields_are_not_accepted_by_log_exporter(tmp_path):
+    config_path = tmp_path / "ov.conf"
+    config_path.write_text(
+        json.dumps(
+            {
+                "server": {
+                    "observability": {
+                        "logs": {"capture_content": True},
+                    }
+                }
+            }
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"server\.observability\.logs\.capture_content",
+    ):
+        load_server_config(str(config_path))

@@ -143,7 +143,11 @@ All memory content must be written in {output_language}.
                 result["uri"] = uri
                 results.append(result)
             except Exception as e:
-                tracer.error(f"Failed to read source trajectory {uri}: {e}")
+                tracer.error(
+                    f"Failed to read source trajectory {uri}: {e}",
+                    e,
+                    contains_content=True,
+                )
         return results
 
     def _build_context_result(
@@ -203,7 +207,11 @@ All memory content must be written in {output_language}.
                     if _is_directory_not_found_error(e):
                         candidate_uris = []
                     else:
-                        tracer.error(f"Failed to list experiences in {experience_dir}: {e}")
+                        tracer.error(
+                            f"Failed to list experiences in {experience_dir}: {e}",
+                            e,
+                            contains_content=True,
+                        )
 
         prefetch_messages: List[Dict[str, Any]] = [self._build_conversation_message()]
         add_tool_call_pair_to_messages(

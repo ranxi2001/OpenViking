@@ -222,7 +222,7 @@ class MemoryReadTool(MemoryTool):
         except NotFoundError as e:
             return {"error": str(e)}
         except Exception as e:
-            tracer.error(f"Failed to execute read: {e}")
+            tracer.error(f"Failed to execute read: {e}", e, contains_content=True)
             return {"error": str(e)}
 
 
@@ -277,7 +277,7 @@ class MemorySearchTool(MemoryTool):
             )
             return optimize_search_result(search_result.to_dict(), limit=limit)
         except Exception as e:
-            tracer.error(f"Failed to execute search: {e}")
+            tracer.error(f"Failed to execute search: {e}", e, contains_content=True)
             return {"error": str(e)}
 
 
@@ -345,7 +345,11 @@ class MemoryLsTool(MemoryTool):
                 return "Directory is empty. You can write new files to create memory content."
             return "\n".join(result_lines)
         except Exception as e:
-            tracer.info(f"Failed to execute ls: {e}")
+            tracer.info(
+                f"Failed to execute ls: {e}",
+                contains_content=True,
+                attributes={"error.type": f"{type(e).__module__}.{type(e).__qualname__}"},
+            )
             return {"error": str(e)}
 
 

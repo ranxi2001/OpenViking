@@ -222,6 +222,8 @@ class StreamingPolicyTrainer:
             f"rollout_case={rollout.case.name} "
             f"new_gradients={len(gradients)}",
             console=self.config.trace_console,
+            contains_content=True,
+            attributes={"openviking.train.gradient_count": len(gradients)},
         )
         buffered = _BufferedRolloutTraining(
             gradients=list(gradients),
@@ -241,6 +243,14 @@ class StreamingPolicyTrainer:
             f"written_uris={result.apply_result.written_uris} "
             f"errors={result.apply_result.errors}",
             console=self.config.trace_console,
+            contains_content=True,
+            attributes={
+                "openviking.train.flush_reason": result.metadata.get("flush_reason"),
+                "openviking.train.rollout_count": result.metadata.get("rollout_count"),
+                "openviking.train.gradient_count": result.metadata.get("gradient_count"),
+                "openviking.train.written_count": len(result.apply_result.written_uris),
+                "openviking.train.error_count": len(result.apply_result.errors),
+            },
         )
         return scoped_result
 
@@ -277,8 +287,7 @@ class StreamingPolicyTrainer:
                 metadata={"no_op": True, "gradient_count": 0},
             )
         tracer.info(
-            "StreamingPolicyTrainer buffered gradients "
-            f"new_gradients={len(gradients)}",
+            f"StreamingPolicyTrainer buffered gradients new_gradients={len(gradients)}",
             console=self.config.trace_console,
         )
         buffered = _BufferedRolloutTraining(
@@ -290,7 +299,6 @@ class StreamingPolicyTrainer:
         result = await self._batcher.submit(buffered)
         self._last_apply_result = result.apply_result
         return _scope_training_result_to_submitter(result, buffered)
-
 
     @tracer("train.streaming_policy_trainer.train_rollouts", ignore_result=True, ignore_args=True)
     async def train_rollouts(
@@ -317,9 +325,7 @@ class StreamingPolicyTrainer:
         analyses = _unique_by_identity(
             [item.analysis for item in items if item.analysis is not None]
         )
-        rollouts = _unique_by_identity(
-            [item.rollout for item in items if item.rollout is not None]
-        )
+        rollouts = _unique_by_identity([item.rollout for item in items if item.rollout is not None])
         tracer.info(
             "StreamingPolicyTrainer flush started "
             f"reason={reason} "
@@ -355,6 +361,13 @@ class StreamingPolicyTrainer:
                 f"written_uris={apply_result.written_uris} "
                 f"errors={apply_result.errors}",
                 console=self.config.trace_console,
+                contains_content=True,
+                attributes={
+                    "openviking.train.flush_reason": reason,
+                    "openviking.train.chunk_index": chunk_index,
+                    "openviking.train.written_count": len(apply_result.written_uris),
+                    "openviking.train.error_count": len(apply_result.errors),
+                },
             )
 
         plan = _combine_update_plans(plans)
@@ -396,6 +409,13 @@ class StreamingPolicyTrainer:
             f"written_uris={apply_result.written_uris} "
             f"errors={apply_result.errors}",
             console=self.config.trace_console,
+            contains_content=True,
+            attributes={
+                "openviking.train.flush_reason": reason,
+                "openviking.train.chunk_count": len(chunk_gradient_counts),
+                "openviking.train.written_count": len(apply_result.written_uris),
+                "openviking.train.error_count": len(apply_result.errors),
+            },
         )
         return result
 
@@ -572,8 +592,12 @@ def _scope_apply_result_to_plan(
     )
     return PolicyApplyResult(
         updated_policy_set=apply_result.updated_policy_set,
-        written_uris=[uri for uri in getattr(apply_result, "written_uris", []) or [] if uri in plan_uris],
-        deleted_uris=[uri for uri in getattr(apply_result, "deleted_uris", []) or [] if uri in plan_uris],
+        written_uris=[
+            uri for uri in getattr(apply_result, "written_uris", []) or [] if uri in plan_uris
+        ],
+        deleted_uris=[
+            uri for uri in getattr(apply_result, "deleted_uris", []) or [] if uri in plan_uris
+        ],
         errors=list(getattr(apply_result, "errors", []) or []),
         metadata=metadata,
     )
@@ -696,7 +720,9 @@ def _combine_training_results(
             analyses=[],
             gradients=[],
             plan=PolicyUpdatePlan(metadata={"empty": True}),
-            apply_result=PolicyApplyResult(updated_policy_set=ExperienceSet(root_uri="", policies=[])),
+            apply_result=PolicyApplyResult(
+                updated_policy_set=ExperienceSet(root_uri="", policies=[])
+            ),
             metadata={
                 "source": source,
                 "rollout_count": 0,

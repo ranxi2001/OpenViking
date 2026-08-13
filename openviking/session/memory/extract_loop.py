@@ -284,7 +284,10 @@ The final output of the model must strictly follow the JSON Schema format shown 
                 # Check if any write_uris target existing files that weren't read
                 refetch_uris = await self._check_unread_existing_files(final_operations)
                 if refetch_uris:
-                    tracer.info(f"Found unread existing files: {refetch_uris}, refetching...")
+                    tracer.info(
+                        f"Found unread existing files: {refetch_uris}, refetching...",
+                        contains_content=True,
+                    )
                     # Add refetch results to messages and continue loop
                     await self._add_refetch_results_to_messages(messages, refetch_uris)
                     # Allow one extra iteration for refetch
@@ -316,15 +319,14 @@ The final output of the model must strictly follow the JSON Schema format shown 
             tracer.error(
                 "LLM returned neither tool calls nor operations "
                 f"(iteration {iteration}/{max_iterations}) "
-                f"failure_kind={failure_kind} response_preview={failure_preview!r}"
+                f"failure_kind={failure_kind} response_preview={failure_preview!r}",
+                contains_content=True,
             )
             # Add format error message if parse failed (max 1 retry)
             if self._format_retry_count == 0:
                 self._format_retry_count += 1
                 max_iterations += 1
-                retry_reason = (
-                    "refusal_text" if failure_kind == "refusal_text" else "format_retry"
-                )
+                retry_reason = "refusal_text" if failure_kind == "refusal_text" else "format_retry"
                 tracer.info(f"Extended max_iterations to {max_iterations} for {retry_reason}")
                 self._add_format_error_message(messages)
 
@@ -334,7 +336,8 @@ The final output of the model must strictly follow the JSON Schema format shown 
                 tracer.info(
                     "Memory extraction final response could not be parsed as JSON operations "
                     f"after {max_iterations} iterations — treating as no operations "
-                    f"failure_kind={failure_kind} response_preview={failure_preview!r}"
+                    f"failure_kind={failure_kind} response_preview={failure_preview!r}",
+                    contains_content=True,
                 )
                 final_operations = ResolvedOperations(
                     upsert_operations=[],
@@ -356,7 +359,10 @@ The final output of the model must strictly follow the JSON Schema format shown 
             else:
                 raise RuntimeError("ReAct loop completed but no operations generated")
 
-        tracer.info(f"final_operations={final_operations.model_dump_json(indent=4)}")
+        tracer.info(
+            f"final_operations={final_operations.model_dump_json(indent=4)}",
+            contains_content=True,
+        )
 
         # Resolve links after the loop completes using the URIs already bound in resolve_operations().
         await self.finalize_operations(final_operations, raw_links)
@@ -364,7 +370,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
         return final_operations, tools_used
 
     async def resolve_operations(self, operations) -> tuple[ResolvedOperations, List]:
-        tracer.info(f"operations={JsonUtils.dumps(operations)}")
+        tracer.info(f"operations={JsonUtils.dumps(operations)}", contains_content=True)
         upsert_operations: List[ResolvedOperation] = []
         delete_file_contents: List[MemoryFile] = []
         errors: List[str] = []
@@ -484,14 +490,16 @@ The final output of the model must strictly follow the JSON Schema format shown 
 
         return resolved, raw_links
 
-
     def _normalize_delete_ids(self, raw_delete_ids: List[Any]) -> List[DeleteId]:
         delete_ids: List[DeleteId] = []
         for raw in raw_delete_ids:
             try:
                 delete_ids.append(DeleteId.model_validate(raw))
             except Exception as e:
-                tracer.info(f"Skipping invalid delete_ids item: {raw}, error={e}")
+                tracer.info(
+                    f"Skipping invalid delete_ids item: {raw}, error={e}",
+                    contains_content=True,
+                )
         return delete_ids
 
     async def finalize_operations(self, operations: ResolvedOperations, raw_links: List) -> None:
@@ -590,7 +598,11 @@ The final output of the model must strictly follow the JSON Schema format shown 
                 has_unknown_tool = True
             # Skip if arguments is None
             if tool_call.arguments is None:
-                tracer.error(f"Tool call {tool_call.name} has no arguments, skipping")
+                tracer.error(
+                    f"Tool call {tool_call.name} has no arguments, skipping",
+                    contains_content=True,
+                    attributes={"openviking.tool.arguments_present": False},
+                )
                 continue
 
             tools_used.append(
@@ -637,7 +649,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
                 tool_choice=tool_choice,
                 thinking=self.thinking,
             )
-        tracer.info(f"llm_response={response}")
+        tracer.info(f"llm_response={response}", contains_content=True)
         self._last_llm_failure_kind = None
         self._last_llm_failure_content = ""
         # print(f'response={response}')
@@ -679,8 +691,14 @@ The final output of the model must strictly follow the JSON Schema format shown 
         elif response.has_tool_calls:
             # Format tool calls nicely for debug logging
             for tc in response.tool_calls:
-                tracer.info(f"[assistant tool_call] (id={tc.id}, name={tc.name})")
-                tracer.info(f"  {json.dumps(tc.arguments, indent=2, ensure_ascii=False)}")
+                tracer.info(
+                    f"[assistant tool_call] (id={tc.id}, name={tc.name})",
+                    contains_content=True,
+                )
+                tracer.info(
+                    f"  {json.dumps(tc.arguments, indent=2, ensure_ascii=False)}",
+                    contains_content=True,
+                )
             return (response.tool_calls, None)
         else:
             # Case 2: VLMResponse without tool calls - get content from response
@@ -708,7 +726,8 @@ The final output of the model must strictly follow the JSON Schema format shown 
                     tracer.error(
                         "Failed to parse memory operations "
                         f"failure_kind={failure_kind} error={error} "
-                        f"response_preview={_preview_text(content)!r}"
+                        f"response_preview={_preview_text(content)!r}",
+                        contains_content=True,
                     )
                     return (None, None)
 
@@ -722,7 +741,8 @@ The final output of the model must strictly follow the JSON Schema format shown 
         tracer.error(
             "No tool calls or operations parsed "
             f"failure_kind={self._last_llm_failure_kind} "
-            f"response_preview={_preview_text(self._last_llm_failure_content)!r}"
+            f"response_preview={_preview_text(self._last_llm_failure_content)!r}",
+            contains_content=True,
         )
         return (None, None)
 
@@ -854,7 +874,10 @@ The final output of the model must strictly follow the JSON Schema format shown 
                     )
                     break
         if errors:
-            tracer.info(f"SEARCH/REPLACE patch validation failed before apply: {errors}")
+            tracer.info(
+                f"SEARCH/REPLACE patch validation failed before apply: {errors}",
+                contains_content=True,
+            )
         return errors
 
     def _build_patch_repair_instruction(self, patch_errors: List[Dict[str, Any]]) -> str:

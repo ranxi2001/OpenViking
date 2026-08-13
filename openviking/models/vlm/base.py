@@ -7,7 +7,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Callable, Dict, List, Mapping, Optional, Union
 
 from openviking.utils.exceptions import AllCredentialsFailedError
 from openviking.utils.model_retry import (
@@ -21,6 +21,25 @@ from .token_usage import TokenUsageTracker
 
 _THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>")
 logger = get_logger(__name__)
+
+_GEN_AI_PROVIDER_NAMES = {
+    "azure": "azure.ai.openai",
+    "azure_ai": "azure.ai.inference",
+    "azure_text": "azure.ai.openai",
+    "bedrock": "aws.bedrock",
+    "gemini": "gcp.gemini",
+    "kimi": "moonshot_ai",
+    "moonshot": "moonshot_ai",
+    "openai-codex": "openai",
+    "vertex_ai": "gcp.vertex_ai",
+    "xai": "x_ai",
+}
+
+
+def _get_field(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
 
 
 class UnsupportedMediaInputError(RuntimeError):
@@ -209,6 +228,115 @@ class VLMBase(ABC):
     def is_available(self) -> bool:
         """Check if available"""
         return self.api_key is not None or self.api_base is not None
+
+    def _record_inference_event(
+        self,
+        response: Any = None,
+        *,
+        error: Optional[Exception] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        request: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Record safe metadata for a completed or failed VLM call."""
+        try:
+            from openviking.telemetry import tracer
+
+            provider_name = str(provider or self.provider or "unknown")
+            attributes: Dict[str, Any] = {
+                "gen_ai.operation.name": "chat",
+                "gen_ai.provider.name": _GEN_AI_PROVIDER_NAMES.get(
+                    provider_name.lower(), provider_name
+                ),
+            }
+            request_model = _get_field(request, "model") or model or self.model
+            if request_model:
+                attributes["gen_ai.request.model"] = str(request_model)
+            if _get_field(request, "stream") is True:
+                attributes["gen_ai.request.stream"] = True
+            if error is not None:
+                attributes["error.type"] = f"{type(error).__module__}.{type(error).__qualname__}"
+
+            response_id = _get_field(response, "id")
+            if response_id:
+                attributes["gen_ai.response.id"] = str(response_id)
+            response_model = _get_field(response, "model")
+            if response_model:
+                attributes["gen_ai.response.model"] = str(response_model)
+
+            finish_reasons = []
+            for choice in _get_field(response, "choices") or []:
+                finish_reason = _get_field(choice, "finish_reason")
+                if finish_reason:
+                    finish_reasons.append(str(finish_reason))
+            if finish_reasons:
+                attributes["gen_ai.response.finish_reasons"] = finish_reasons
+
+            usage = _get_field(response, "usage")
+            prompt_details = _get_field(usage, "prompt_tokens_details")
+            completion_details = _get_field(usage, "completion_tokens_details")
+
+            def add_int(key: str, value: Any) -> None:
+                if value is None or isinstance(value, bool):
+                    return
+                try:
+                    attributes[key] = int(value)
+                except (TypeError, ValueError, OverflowError):
+                    return
+
+            input_tokens = _get_field(usage, "prompt_tokens")
+            if input_tokens is None:
+                input_tokens = _get_field(usage, "input_tokens")
+            add_int("gen_ai.usage.input_tokens", input_tokens)
+
+            output_tokens = _get_field(usage, "completion_tokens")
+            if output_tokens is None:
+                output_tokens = _get_field(usage, "output_tokens")
+            add_int("gen_ai.usage.output_tokens", output_tokens)
+            cache_creation_tokens = _get_field(usage, "cache_creation_input_tokens")
+            if cache_creation_tokens is None:
+                cache_creation_tokens = _get_field(prompt_details, "cache_write_tokens")
+            add_int("gen_ai.usage.cache_creation.input_tokens", cache_creation_tokens)
+            cache_read_tokens = _get_field(usage, "cache_read_input_tokens")
+            if cache_read_tokens is None:
+                cache_read_tokens = _get_field(prompt_details, "cached_tokens")
+            add_int("gen_ai.usage.cache_read.input_tokens", cache_read_tokens)
+
+            reasoning_tokens = _get_field(usage, "reasoning_tokens")
+            if reasoning_tokens is None:
+                reasoning_tokens = _get_field(completion_details, "reasoning_tokens")
+            add_int("gen_ai.usage.reasoning.output_tokens", reasoning_tokens)
+            add_int(
+                "openviking.gen_ai.usage.total_tokens",
+                _get_field(usage, "total_tokens"),
+            )
+            add_int(
+                "openviking.gen_ai.usage.input_audio_tokens",
+                _get_field(prompt_details, "audio_tokens"),
+            )
+            add_int(
+                "openviking.gen_ai.usage.output_audio_tokens",
+                _get_field(completion_details, "audio_tokens"),
+            )
+            add_int(
+                "openviking.gen_ai.usage.accepted_prediction_tokens",
+                _get_field(completion_details, "accepted_prediction_tokens"),
+            )
+            add_int(
+                "openviking.gen_ai.usage.rejected_prediction_tokens",
+                _get_field(completion_details, "rejected_prediction_tokens"),
+            )
+
+            tracer.add_event("gen_ai.client.inference.operation.details", attributes)
+        except Exception as e:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "vlm inference event emit failed provider=%s model_name=%s err=%s: %s",
+                    provider or self.provider,
+                    model or self.model,
+                    type(e).__name__,
+                    e,
+                )
 
     # Token usage tracking methods
     def update_token_usage(

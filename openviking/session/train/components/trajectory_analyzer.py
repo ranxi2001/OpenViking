@@ -272,7 +272,7 @@ class TrajectoryRolloutAnalyzer:
                 f"written={len(memory_result.written_uris)}, "
                 f"edited={len(memory_result.edited_uris)}, "
                 f"deleted={len(memory_result.deleted_uris)}, "
-                f"errors={len(memory_result.errors)}"
+                f"errors={len(memory_result.errors)}",
             )
             contexts = _contexts_from_memory_result(memory_result)
             return (
@@ -363,7 +363,10 @@ def _log_operations(operations: ResolvedOperations) -> None:
         f"{op.memory_type}(uris={op.uris!r})" for op in getattr(operations, "upsert_operations", [])
     ]
     delete_uris = [dc.uri for dc in getattr(operations, "delete_file_contents", [])]
-    tracer.info(f"[trajectory] LLM operations: ops={op_items}, delete_uris={delete_uris}")
+    tracer.info(
+        f"[trajectory] LLM operations: ops={op_items}, delete_uris={delete_uris}",
+        contains_content=True,
+    )
 
 
 def _contexts_from_memory_result(memory_result: MemoryUpdateResult) -> list[Context]:

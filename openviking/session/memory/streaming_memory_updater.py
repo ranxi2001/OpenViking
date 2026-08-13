@@ -209,6 +209,16 @@ class StreamingMemoryUpdater:
             f"deleted_uris={scoped_result.apply_result.deleted_uris} "
             f"errors={scoped_result.apply_result.errors}",
             console=self.config.trace_console,
+            contains_content=True,
+            attributes={
+                "openviking.memory.flush_reason": result.metadata.get("flush_reason"),
+                "openviking.memory.request_count": result.request_count,
+                "openviking.memory.operation_count": result.metadata.get("operation_count"),
+                "openviking.memory.written_count": len(scoped_result.apply_result.written_uris),
+                "openviking.memory.edited_count": len(scoped_result.apply_result.edited_uris),
+                "openviking.memory.deleted_count": len(scoped_result.apply_result.deleted_uris),
+                "openviking.memory.error_count": len(scoped_result.apply_result.errors),
+            },
         )
         return scoped_result
 
@@ -399,6 +409,15 @@ class StreamingMemoryUpdater:
             f"deleted_uris={apply_result.deleted_uris} "
             f"errors={apply_result.errors}",
             console=self.config.trace_console,
+            contains_content=True,
+            attributes={
+                "openviking.memory.flush_reason": "append_only_fast_path",
+                "openviking.memory.operation_count": _operation_count(operations),
+                "openviking.memory.written_count": len(apply_result.written_uris),
+                "openviking.memory.edited_count": len(apply_result.edited_uris),
+                "openviking.memory.deleted_count": len(apply_result.deleted_uris),
+                "openviking.memory.error_count": len(apply_result.errors),
+            },
         )
         return result
 
@@ -423,6 +442,15 @@ class StreamingMemoryUpdater:
             f"input_patches={input_patches} "
             f"input_deletes={input_deletes}",
             console=self.config.trace_console,
+            contains_content=True,
+            attributes={
+                "openviking.memory.type": group_key.memory_type,
+                "openviking.memory.flush_reason": reason,
+                "openviking.memory.request_count": len(requests),
+                "openviking.memory.input_operation_count": input_operations,
+                "openviking.memory.input_patch_count": input_patches,
+                "openviking.memory.input_delete_count": input_deletes,
+            },
         )
         merged_operations = await self._merge_requests(requests)
         first_request = requests[0]
@@ -450,6 +478,16 @@ class StreamingMemoryUpdater:
             f"deleted_uris={apply_result.deleted_uris} "
             f"errors={apply_result.errors}",
             console=self.config.trace_console,
+            contains_content=True,
+            attributes={
+                "openviking.memory.type": group_key.memory_type,
+                "openviking.memory.flush_reason": reason,
+                "openviking.memory.request_count": len(requests),
+                "openviking.memory.written_count": len(apply_result.written_uris),
+                "openviking.memory.edited_count": len(apply_result.edited_uris),
+                "openviking.memory.deleted_count": len(apply_result.deleted_uris),
+                "openviking.memory.error_count": len(apply_result.errors),
+            },
         )
         return result
 
@@ -649,6 +687,13 @@ async def merge_memory_operations(
         f"group_count={len(all_group_keys)} "
         f"groups={sorted(str(k) for k in all_group_keys)}",
         console=trace_console,
+        contains_content=True,
+        attributes={
+            "openviking.memory.patch_count": len(operations.upsert_operations or []),
+            "openviking.memory.delete_count": len(operations.delete_file_contents or []),
+            "openviking.memory.passthrough_upsert_count": len(passthrough_upserts),
+            "openviking.memory.group_count": len(all_group_keys),
+        },
     )
 
     merged_upserts = list(passthrough_upserts)
@@ -705,6 +750,15 @@ async def merge_memory_operations(
             f"reason=llm_merge_failed patch_count={len(ops_list)} "
             f"target_count={len(_unique_operation_uris(ops_list))} error={merge_result}",
             console=trace_console,
+            contains_content=True,
+            attributes={
+                "openviking.memory.type": memory_type,
+                "openviking.memory.merge_mode": "fallback_original",
+                "openviking.memory.merge_reason": "llm_merge_failed",
+                "openviking.memory.patch_count": len(ops_list),
+                "openviking.memory.target_count": len(_unique_operation_uris(ops_list)),
+                "error.type": f"{type(merge_result).__module__}.{type(merge_result).__qualname__}",
+            },
         )
         logger.warning(
             "[streaming_memory_updater] merge failed for %s (%s): %s",
@@ -904,6 +958,13 @@ async def merge_one_memory_type_operations(
         f"required_files={required_file_uris} patch_count={len(patches)} "
         f"target_count={target_count}",
         console=trace_console,
+        contains_content=True,
+        attributes={
+            "openviking.memory.type": memory_type,
+            "openviking.memory.required_file_count": len(required_file_uris),
+            "openviking.memory.patch_count": len(patches),
+            "openviking.memory.target_count": target_count,
+        },
     )
     orchestrator = ExtractLoop(
         vlm=vlm,
@@ -1042,7 +1103,13 @@ async def render_operation_after_file_content(
             )
             tracer.info(
                 "[streaming_memory_updater] skipping preview field update after merge_op failure "
-                f"memory_type={op.memory_type} field={field_def.name} error={exc}"
+                f"memory_type={op.memory_type} field={field_def.name} error={exc}",
+                contains_content=True,
+                attributes={
+                    "openviking.memory.type": op.memory_type,
+                    "openviking.memory.field": field_def.name,
+                    "error.type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                },
             )
             if current_value is None:
                 metadata.pop(field_def.name, None)
@@ -1120,7 +1187,12 @@ async def classify_memory_merge_mode(
             tracer.info(
                 "[streaming_memory_updater] merge-mode preview failed; falling back to "
                 f"raw content comparison memory_type={getattr(op, 'memory_type', None)} "
-                f"error={exc}"
+                f"error={exc}",
+                contains_content=True,
+                attributes={
+                    "openviking.memory.type": getattr(op, "memory_type", None),
+                    "error.type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                },
             )
     if old_plain_content == str(fields.get("content") or "").strip():
         return True, "single_existing_content_unchanged"
@@ -1245,7 +1317,12 @@ def _uris_for_merge_group_operation(
     except Exception as exc:
         tracer.info(
             "[streaming_memory_updater] failed to enforce merge group uri "
-            f"memory_type={op.memory_type} peer_id={peer_id} old_uris={op.uris} error={exc}"
+            f"memory_type={op.memory_type} peer_id={peer_id} old_uris={op.uris} error={exc}",
+            contains_content=True,
+            attributes={
+                "openviking.memory.type": op.memory_type,
+                "error.type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+            },
         )
         return list(op.uris or [])
 

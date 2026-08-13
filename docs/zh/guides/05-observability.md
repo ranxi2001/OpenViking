@@ -240,7 +240,9 @@ curl -X POST http://localhost:1933/api/v1/search/find \
         "service_name": "openviking-server",
         "local_path": "~/.openviking/logs/traces.jsonl",
         "local_rotation_mb": 40,
-        "local_backup_count": 2
+        "local_backup_count": 2,
+        "capture_content": false,
+        "content_max_length": 4096
       }
     }
   }
@@ -252,6 +254,12 @@ curl -X POST http://localhost:1933/api/v1/search/find \
 ```text
 ~/.openviking/logs/traces.jsonl
 ```
+
+常规诊断消息会以长度受限的 `openviking.log` 事件属性保留；提示词、模型输出、
+工具参数、记忆正文和其他载荷内容默认不导出。只有排查确实需要这些内容时，才应将
+`capture_content` 设为 `true`。导出的文本会先进行尽力而为的凭据和内联图片脱敏，
+再限制到 `content_max_length` 个字符（范围 1-65536）。正文仍可能包含用户数据或其他
+敏感信息，因此应限制 trace 导出文件的访问范围，并在排查结束后及时删除。
 
 当文件达到 `local_rotation_mb` 后会轮转，例如：
 
@@ -331,7 +339,9 @@ python tests/upload_offline_trace.py \
         },
         "endpoint": "otel-collector:4317",
         "service_name": "openviking-server",
-        "headers": {}
+        "headers": {},
+        "capture_content": false,
+        "content_max_length": 4096
       }
     }
   }

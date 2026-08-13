@@ -151,6 +151,20 @@ def detect_provider_by_model(model: str) -> str | None:
     return None
 
 
+def _provider_from_litellm_route(model: str) -> str | None:
+    prefix = model.partition("/")[0].lower()
+    return {
+        "azure": "azure",
+        "azure_ai": "azure_ai",
+        "azure_text": "azure_text",
+        "bedrock": "bedrock",
+        "gemini": "gemini",
+        "moonshot": "moonshot",
+        "openai": "openai",
+        "vertex_ai": "vertex_ai",
+    }.get(prefix)
+
+
 class LiteLLMVLMProvider(VLMBase):
     """
     Multi-provider VLM implementation based on LiteLLM.
@@ -217,6 +231,17 @@ class LiteLLMVLMProvider(VLMBase):
         if self._forward_api_key is not None:
             return self._forward_api_key is True
         return not _has_litellm_prefix(model, NATIVE_AUTH_LITELLM_PREFIXES)
+
+    def _inference_event_target(self) -> tuple[str, str]:
+        model = self._resolve_model(self.model or "gpt-4o-mini")
+        provider = (
+            _provider_from_litellm_route(model)
+            or self._detected_provider
+            or detect_provider_by_model(model)
+            or self._provider_name
+            or self.provider
+        )
+        return provider, model
 
     def _detect_image_format(self, data: bytes) -> str:
         """Detect image format from magic bytes.
@@ -410,6 +435,7 @@ class LiteLLMVLMProvider(VLMBase):
             kwargs_messages = [{"role": "user", "content": content}]
         return self._build_kwargs(model, kwargs_messages, tools, tool_choice, thinking=thinking)
 
+    @tracer("litellm.vlm.call", ignore_result=True, ignore_args=True)
     def get_completion(
         self,
         prompt: str = "",
@@ -420,25 +446,42 @@ class LiteLLMVLMProvider(VLMBase):
     ) -> Union[str, VLMResponse]:
         """Get text completion synchronously."""
         kwargs = self._build_text_kwargs(prompt, thinking, tools, tool_choice, messages)
+        last_response = None
 
         def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = completion(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
-            self._update_token_usage_from_response(response, duration_seconds=elapsed)
-            tracer.info(f"response={response}")
+            self._update_token_usage_from_response(
+                response, duration_seconds=elapsed, record_event=False
+            )
+            tracer.info(f"response={response}", contains_content=True)
             if tools:
-                return self._build_vlm_response(response, has_tools=True)
-            return self._clean_response(self._extract_content_from_response(response))
+                result = self._build_vlm_response(response, has_tools=True)
+            else:
+                result = self._clean_response(self._extract_content_from_response(response))
+            provider, model = self._inference_event_target()
+            self._record_inference_event(response, provider=provider, model=model, request=kwargs)
+            return result
 
-        return retry_sync(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="LiteLLM VLM completion",
-        )
+        try:
+            return retry_sync(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="LiteLLM VLM completion",
+            )
+        except Exception as e:
+            provider, model = self._inference_event_target()
+            self._record_inference_event(
+                last_response, error=e, provider=provider, model=model, request=kwargs
+            )
+            raise
 
-    @tracer("litellm.vlm.call", ignore_result=True, ignore_args=["messages"])
+    @tracer("litellm.vlm.call", ignore_result=True, ignore_args=True)
     async def get_completion_async(
         self,
         prompt: str = "",
@@ -449,28 +492,46 @@ class LiteLLMVLMProvider(VLMBase):
     ) -> Union[str, VLMResponse]:
         """Get text completion asynchronously."""
         kwargs = self._build_text_kwargs(prompt, thinking, tools, tool_choice, messages)
-        # 用 tracer.info 打印请求
         tracer.info(
-            f"request: {json.dumps(redact_image_data_urls(kwargs), ensure_ascii=False, indent=2)}"
+            f"request: {json.dumps(redact_image_data_urls(kwargs), ensure_ascii=False, indent=2)}",
+            contains_content=True,
         )
+        last_response = None
 
         async def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = await acompletion(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
-            self._update_token_usage_from_response(response, duration_seconds=elapsed)
-            tracer.info(f"response={response}")
+            self._update_token_usage_from_response(
+                response, duration_seconds=elapsed, record_event=False
+            )
+            tracer.info(f"response={response}", contains_content=True)
             if tools:
-                return self._build_vlm_response(response, has_tools=True)
-            return self._clean_response(self._extract_content_from_response(response))
+                result = self._build_vlm_response(response, has_tools=True)
+            else:
+                result = self._clean_response(self._extract_content_from_response(response))
+            provider, model = self._inference_event_target()
+            self._record_inference_event(response, provider=provider, model=model, request=kwargs)
+            return result
 
-        return await retry_async(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="LiteLLM VLM async completion",
-        )
+        try:
+            return await retry_async(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="LiteLLM VLM async completion",
+            )
+        except Exception as e:
+            provider, model = self._inference_event_target()
+            self._record_inference_event(
+                last_response, error=e, provider=provider, model=model, request=kwargs
+            )
+            raise
 
+    @tracer("litellm.vlm.call", ignore_result=True, ignore_args=True)
     def get_vision_completion(
         self,
         prompt: str = "",
@@ -482,23 +543,41 @@ class LiteLLMVLMProvider(VLMBase):
     ) -> Union[str, VLMResponse]:
         """Get vision completion synchronously."""
         kwargs = self._build_vision_kwargs(prompt, images, thinking, tools, tool_choice, messages)
+        last_response = None
 
         def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = completion(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
-            self._update_token_usage_from_response(response, duration_seconds=elapsed)
+            self._update_token_usage_from_response(
+                response, duration_seconds=elapsed, record_event=False
+            )
             if tools:
-                return self._build_vlm_response(response, has_tools=True)
-            return self._clean_response(self._extract_content_from_response(response))
+                result = self._build_vlm_response(response, has_tools=True)
+            else:
+                result = self._clean_response(self._extract_content_from_response(response))
+            provider, model = self._inference_event_target()
+            self._record_inference_event(response, provider=provider, model=model, request=kwargs)
+            return result
 
-        return retry_sync(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="LiteLLM VLM vision completion",
-        )
+        try:
+            return retry_sync(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="LiteLLM VLM vision completion",
+            )
+        except Exception as e:
+            provider, model = self._inference_event_target()
+            self._record_inference_event(
+                last_response, error=e, provider=provider, model=model, request=kwargs
+            )
+            raise
 
+    @tracer("litellm.vlm.call", ignore_result=True, ignore_args=True)
     async def get_vision_completion_async(
         self,
         prompt: str = "",
@@ -510,29 +589,49 @@ class LiteLLMVLMProvider(VLMBase):
     ) -> Union[str, VLMResponse]:
         """Get vision completion asynchronously."""
         kwargs = self._build_vision_kwargs(prompt, images, thinking, tools, tool_choice, messages)
+        last_response = None
 
         async def _call() -> Union[str, VLMResponse]:
+            nonlocal last_response
+            last_response = None
             t0 = time.perf_counter()
             response = await acompletion(**kwargs)
+            last_response = response
             elapsed = time.perf_counter() - t0
-            self._update_token_usage_from_response(response, duration_seconds=elapsed)
+            self._update_token_usage_from_response(
+                response, duration_seconds=elapsed, record_event=False
+            )
             if tools:
-                return self._build_vlm_response(response, has_tools=True)
-            return self._clean_response(self._extract_content_from_response(response))
+                result = self._build_vlm_response(response, has_tools=True)
+            else:
+                result = self._clean_response(self._extract_content_from_response(response))
+            provider, model = self._inference_event_target()
+            self._record_inference_event(response, provider=provider, model=model, request=kwargs)
+            return result
 
-        return await retry_async(
-            _call,
-            max_retries=self.max_retries,
-            logger=logger,
-            operation_name="LiteLLM VLM async vision completion",
-        )
+        try:
+            return await retry_async(
+                _call,
+                max_retries=self.max_retries,
+                logger=logger,
+                operation_name="LiteLLM VLM async vision completion",
+            )
+        except Exception as e:
+            provider, model = self._inference_event_target()
+            self._record_inference_event(
+                last_response, error=e, provider=provider, model=model, request=kwargs
+            )
+            raise
 
     def _update_token_usage_from_response(
         self,
         response,
         duration_seconds: float = 0.0,
+        *,
+        record_event: bool = True,
     ) -> None:
         """Update token usage from response."""
+        provider, model = self._inference_event_target()
         if hasattr(response, "usage") and response.usage:
             prompt_tokens = response.usage.prompt_tokens
             completion_tokens = response.usage.completion_tokens
@@ -543,3 +642,5 @@ class LiteLLMVLMProvider(VLMBase):
                 completion_tokens=completion_tokens,
                 duration_seconds=duration_seconds,
             )
+        if record_event:
+            self._record_inference_event(response, provider=provider, model=model)
