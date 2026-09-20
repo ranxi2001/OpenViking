@@ -65,10 +65,21 @@ describe('MermaidDiagram', () => {
     Reflect.deleteProperty(SVGElement.prototype, 'getBBox')
   })
 
-  it('renders a real Mermaid flowchart at its view-box width', async () => {
-    const getMermaid = vi.spyOn(mermaid, 'getMermaid')
-
-    render(<MermaidDiagram chart={'graph TD\n    A[Client] --> B[Server]'} />)
+  it('renders a real flowchart while keeping its styles inside the diagram', async () => {
+    const outsideLabel = 'Outside diagram'
+    render(
+      <>
+        <button>{outsideLabel}</button>
+        <MermaidDiagram
+          chart={[
+            // GHSA-87f9-hvmw-gh4p: :not(&) must not escape the SVG scope.
+            '%%{init: {"fontFamily": "x;a{b} :not(&){background:green !important} c{d}"}}%%',
+            'graph TD',
+            '    A[Client] --> B[Server]',
+          ].join('\n')}
+        />
+      </>,
+    )
 
     expect(screen.getByRole('status').textContent).toContain(
       'Rendering Mermaid diagram...',
@@ -82,7 +93,19 @@ describe('MermaidDiagram', () => {
     expect(diagram.textContent).toContain('Server')
     expect(diagram.parentElement?.style.width).toMatch(/^\d+px$/)
     expect(svg?.style.maxWidth).toBe('none')
-    expect(getMermaid).toHaveBeenCalledWith({ theme: 'default' })
+    const stylesheet = new CSSStyleSheet()
+    stylesheet.replaceSync(
+      [...diagram.querySelectorAll('style')]
+        .map((style) => style.textContent)
+        .join('\n'),
+    )
+    expect(stylesheet.cssRules.length).toBeGreaterThan(0)
+    const outside = screen.getByRole('button', { name: outsideLabel })
+    for (const rule of stylesheet.cssRules) {
+      if (rule instanceof CSSStyleRule) {
+        expect(outside.matches(rule.selectorText)).toBe(false)
+      }
+    }
   })
 
   it('rerenders with Mermaid dark theme when the app theme changes', async () => {
