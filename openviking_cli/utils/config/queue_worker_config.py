@@ -14,8 +14,6 @@ class QueueWorkerConfig(BaseModel):
         description="Maximum number of jobs processed concurrently",
     )
 
-    model_config = {"extra": "forbid"}
-
 
 class AddResourceQueueWorkerConfig(QueueWorkerConfig):
     """Runtime limits for add-resource queue workers."""
@@ -31,11 +29,10 @@ class QueueWorkersConfig(BaseModel):
     """Runtime limits for QueueFS consumers."""
 
     external_parse: QueueWorkerConfig = Field(default_factory=QueueWorkerConfig)
-    add_resource: AddResourceQueueWorkerConfig = Field(
-        default_factory=AddResourceQueueWorkerConfig
-    )
+    add_resource: AddResourceQueueWorkerConfig = Field(default_factory=AddResourceQueueWorkerConfig)
     session_commit: QueueWorkerConfig = Field(
         default_factory=lambda: QueueWorkerConfig(max_concurrent=8)
     )
-
-    model_config = {"extra": "forbid"}
+    external_task: QueueWorkerConfig = Field(
+        default_factory=lambda: QueueWorkerConfig(max_concurrent=10)
+    )

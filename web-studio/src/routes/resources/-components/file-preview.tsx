@@ -22,6 +22,7 @@ import { Button } from '#/components/ui/button'
 import { ScrollArea } from '#/components/ui/scroll-area'
 import { client } from '#/gen/ov-client/client.gen'
 import { getContentDownload, ovClient } from '#/lib/ov-client'
+import { splitMarkdownFrontmatter } from '#/lib/markdown-frontmatter'
 import { parseOkfSidecarMarkdown } from '#/lib/okf-markdown'
 import { fileNameFromUri } from '#/lib/viking-uri'
 import type { GetContentDownloadData } from '#/gen/ov-client/types.gen'
@@ -42,6 +43,7 @@ import { useJsonFormat } from '../-hooks/use-json-format'
 import type { VikingFsEntry } from '../-types/viking-fm'
 import type { CodeEditorHandle } from './code-editor'
 import { OkfMetadataPanel } from './okf-metadata-panel'
+import { YamlMetadata } from './yaml-metadata'
 
 const LazyCodeEditor = lazy(() =>
   import('./code-editor').then((m) => ({ default: m.CodeEditor })),
@@ -144,15 +146,15 @@ const DIRECTORY_LEVEL_META: Array<{
 }> = [
   {
     id: 'abstract',
-    label: 'Abstract',
+    label: 'filePreview.directoryLevels.abstractLabel',
     name: 'L0',
-    title: 'Short semantic abstract',
+    title: 'filePreview.directoryLevels.abstractDescription',
   },
   {
     id: 'overview',
-    label: 'Overview',
+    label: 'filePreview.directoryLevels.overviewLabel',
     name: 'L1',
-    title: 'Directory overview',
+    title: 'filePreview.directoryLevels.overviewDescription',
   },
 ]
 
@@ -239,7 +241,9 @@ function directoryLevelPreview(
 }
 
 function useDirectoryPreview(file: VikingFsEntry | null) {
-  const enabled = Boolean(file?.isDir)
+  const enabled = Boolean(
+    file?.isDir && normalizeDirUri(file.uri) !== 'viking://',
+  )
   const abstractQuery = useQuery({
     enabled,
     queryKey: ['viking-directory-sidecar', file?.uri, 'abstract'],
@@ -305,6 +309,7 @@ function dirnameVikingUri(fileUri: string): string {
   return `${trimmed.slice(0, idx + 1)}`
 }
 
+/** Resolve a decoded file path without interpreting literal # or percent signs. */
 function resolveRelativeVikingUri(
   baseFileUri: string,
   rawPath: string,
@@ -312,11 +317,8 @@ function resolveRelativeVikingUri(
   const baseDir = dirnameVikingUri(baseFileUri)
   const baseBody = baseDir.slice(vikingPrefix.length, -1)
 
-  const pathPart = rawPath.split('#')[0]?.split('?')[0] || ''
-  const suffix = rawPath.slice(pathPart.length)
-
   const baseSegments = baseBody ? baseBody.split('/').filter(Boolean) : []
-  const relativeSegments = pathPart.split('/').filter(Boolean)
+  const relativeSegments = rawPath.split('/').filter(Boolean)
 
   const merged = [...baseSegments]
   for (const segment of relativeSegments) {
@@ -331,7 +333,7 @@ function resolveRelativeVikingUri(
   }
 
   const resolved = `${vikingPrefix}${merged.join('/')}`
-  return `${resolved}${suffix}`
+  return resolved
 }
 
 type MarkdownAssetTarget =
@@ -360,11 +362,8 @@ function resolveMarkdownAssetTarget(
     return { kind: 'external', value: trimmed }
   }
 
-  // react-markdown percent-encodes the URL it passes via `src`/`href`
-  // (e.g. Chinese characters become %E4%BA%92). Decode it back to the literal
-  // form so the API client's query serializer encodes it exactly once and we
-  // avoid a double-encoded URI that the backend rejects with HTTP 400.
-  const decoded = safeDecodeUri(trimmed)
+  // Split URL components before decoding; %23 is literal filename data.
+  const decoded = safeDecodeUri(trimmed.split(/[?#]/, 1)[0])
 
   const vikingUri = decoded.startsWith(vikingPrefix)
     ? decoded
@@ -372,8 +371,7 @@ function resolveMarkdownAssetTarget(
   return { kind: 'viking', value: vikingUri }
 }
 
-function resolveMarkdownAssetUrl(assetPath: string, fileUri: string): string {
-  const target = resolveMarkdownAssetTarget(assetPath, fileUri)
+function resolveMarkdownAssetUrl(target: MarkdownAssetTarget): string {
   if (target.kind === 'viking') {
     return toDownloadUrl(target.value)
   }
@@ -400,7 +398,7 @@ function MarkdownLink({
   const resolvedHref = target
     ? isInternal
       ? target.value
-      : resolveMarkdownAssetUrl(target.value, fileUri)
+      : resolveMarkdownAssetUrl(target)
     : ''
   const isExternal = /^(https?:|mailto:|tel:)/i.test(resolvedHref)
 
@@ -438,7 +436,7 @@ function DirectoryMarkdownLink({
   }
 
   return (
-    <MarkdownLink href={decodedHref} fileUri={fileUri} onNavigate={onNavigate}>
+    <MarkdownLink href={href} fileUri={fileUri} onNavigate={onNavigate}>
       {children}
     </MarkdownLink>
   )
@@ -1394,6 +1392,7 @@ export function FilePreview({
     () => memoryFieldsDisplayContent(preview?.content || ''),
     [preview?.content],
   )
+  const frontmatter = useMemo(() => splitMarkdownFrontmatter(displayContent || ''), [displayContent])
   const okfDocument = useMemo(
     () =>
       file && preview?.fileType === 'markdown'
@@ -1778,7 +1777,7 @@ export function FilePreview({
                               ? 'border-border bg-muted text-foreground'
                               : 'border-border bg-background text-muted-foreground hover:border-foreground/30 hover:text-foreground'
                           }`}
-                          title={level.title}
+                          title={t(level.title)}
                           onClick={() =>
                             setActiveDirectoryLevels((current) => {
                               const next = new Set(current)
@@ -1794,7 +1793,7 @@ export function FilePreview({
                           <span className="font-mono text-[10px] font-semibold uppercase tracking-wide text-primary">
                             {level.name}
                           </span>
-                          <span className="font-medium">{level.label}</span>
+                          <span className="font-medium">{t(level.label)}</span>
                         </button>
                       )
                     })}
@@ -1823,9 +1822,9 @@ export function FilePreview({
                           <span className="font-mono font-semibold uppercase tracking-wide text-primary">
                             {level.name}
                           </span>
-                          <span className="font-medium">{level.label}</span>
+                          <span className="font-medium">{t(level.label)}</span>
                           <span className="text-muted-foreground">
-                            {level.title}
+                            {t(level.title)}
                           </span>
                         </header>
                         {level.document ? (
@@ -1943,7 +1942,7 @@ export function FilePreview({
                     onNavigate={onNavigate}
                     rawFrontmatter={okfDocument.rawFrontmatter}
                   />
-                ) : null}
+                ) : frontmatter ? <YamlMetadata rawFrontmatter={frontmatter.rawFrontmatter} defaultOpen /> : null}
                 <article className="prose prose-sm max-w-none break-words dark:prose-invert dark:prose-pre:bg-muted-foreground/20">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -1971,7 +1970,7 @@ export function FilePreview({
                   >
                     {okfDocument
                       ? okfDocument.body || emptyFileText
-                      : displayContent || emptyFileText}
+                      : (frontmatter?.body ?? displayContent) || emptyFileText}
                   </ReactMarkdown>
                 </article>
               </div>

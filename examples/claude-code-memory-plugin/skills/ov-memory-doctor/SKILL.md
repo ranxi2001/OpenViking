@@ -2,20 +2,15 @@
 name: ov-memory-doctor
 description: >
   Diagnose and fix the OpenViking memory plugin on this machine: the plugin
-  install (marketplace, enablement, hooks, MCP server), the client
-  configuration (ovcli.conf / ov.conf / OPENVIKING_* env — which one wins, what
-  the API key claims) and the connection to the OpenViking server
-  (reachability, 401/403, /mcp). Use whenever memory "isn't working": no
-  <openviking-context> block appears, recall is always empty, captures don't
-  land, MCP memory tools are missing or fail, 401/403 errors, the statusline
-  says offline, right after installing/updating the plugin or switching
-  servers/keys, or when the user asks for the plugin's status. Trigger phrases
-  include "memory not working", "check OpenViking", "plugin status", "记忆没生效",
-  "插件状态", "连不上 OpenViking", "recall 为空", "401", "0 memories
-  extracted". When the server runs on this machine (loopback url) it also
-  checks the port, plugin-only keys in ov.conf that stop the server from
-  starting, and `GET /ready`; everything else server-side stays with
-  `openviking-server doctor`.
+  install (enablement, hooks, MCP server), the client configuration
+  (ovcli.conf / ov.conf / OPENVIKING_* env) and the connection to the
+  OpenViking server (reachability, 401/403, /mcp). Use whenever memory "isn't
+  working": no <openviking-context> block, empty recall, captures not landing,
+  missing or failing MCP memory tools, 401/403, an offline statusline, right
+  after installing/updating the plugin or switching servers/keys, or when the
+  user asks for the plugin's status. Triggers: "memory not working", "check
+  OpenViking", "plugin status", "记忆没生效", "插件状态", "连不上 OpenViking",
+  "recall 为空", "401".
 allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/ov-memory-doctor.mjs *)
 ---
 
@@ -36,8 +31,10 @@ three moving parts and each fails silently in its own way:
 
 When the resolved url is loopback, the server runs on this machine and the
 doctor adds a **Server health** section: whether anything listens on the
-port, plugin-only keys in `ov.conf` (`claude_code`, `codex`, `server.url`)
-that make the server refuse to start, and `GET /ready` — the server's own
+port, plugin-only keys in `ov.conf` (a top-level block named after any
+harness: `claude_code`, `codex`, `cursor`, `trae`, `trae_cn`, `zcode`,
+`opencode`, `dsh`, `pi`, plus `server.url`) that make the server refuse to
+start, and `GET /ready` — the server's own
 per-subsystem verdict (agfs, vectordb, api keys, embedding, ollama). For a
 remote server only `/ready` is probed. Everything else on the server side —
 config validation, live embedding probe, native engine, disk — is
@@ -88,6 +85,7 @@ Work top-down; fix the first ✗ and rerun before chasing the next.
 | `using the ROOT api key` / `403 ROOT API keys cannot access tenant-scoped data APIs` | `api_key` fell through to `ov.conf server.root_api_key`, or the user pasted the root key | Create a user key (`POST /api/v1/admin/accounts/<account>/users` with the root key) and put it in ovcli.conf. |
 | `server is in trusted mode and needs account + user` / 400 `Trusted mode requests must include…` | Server identity comes from headers | Set `account` and `user` in ovcli.conf. |
 | `configured account/user differ from the key's identity` | In `api_key` mode the server ignores `X-OpenViking-Account/User`; data lands under the key's identity | Remove them or use a key for that identity. Explains "I changed the account but nothing changed". |
+| `request/capture timeout exceeds the hook budget` | Claude Code kills the hook before the request finishes | Lower `OPENVIKING_TIMEOUT_MS` / `OPENVIKING_CAPTURE_TIMEOUT_MS`. |
 | `POST /mcp tools/list → 404/406/502/504` while /health is fine | Reverse proxy not forwarding `/mcp`, rewriting `Accept`, or buffering SSE | Fix the proxy (`proxy_buffering off`, forward `/mcp`, pass `Authorization`). |
 | `proxy variables set` + curl works but doctor/hook fails | Node's fetch ignores `HTTP(S)_PROXY`; the plugin ships no proxy/CA handling | `NODE_USE_ENV_PROXY=1` or `NODE_EXTRA_CA_CERTS=<ca.pem>` in the environment that launches Claude Code (`env` block of `~/.claude/settings.json`). |
 | `last auto-recall … reason=offline/bypass/disabled/short_query` | The hook ran and chose not to inject | `offline` → connection; `bypass` → `OPENVIKING_BYPASS_SESSION*`; `short_query` → prompt shorter than `minQueryLength`; only `no_results`/`filtered_out` mean the search actually ran. Note that a 401 on the search call also reads as `no_results`. |
@@ -95,8 +93,8 @@ Work top-down; fix the first ✗ and rerun before chasing the next.
 | `MCP proxy last started against <other url>` | The proxy is a long-lived process; a changed url only takes effect after restart | Restart Claude Code or `/mcp` → reconnect. Key rotation self-heals after a 401 if ovcli.conf changed on disk. |
 | `recall is pinned to the legacy /search/recall endpoint` | One 4xx mentioning "mode" pins recall for 6h | `rm ~/.openviking/state/context-face.json`. |
 | `no hook log … debug is on but no hook has run` | Hooks are not being spawned at all | Registration/enablement/node problem, not a server problem. |
-| `ov.conf has a top-level 'claude_code' block` / `'codex' block` / `server.url is rejected` | Plugin-only keys in the server's own config; the server refuses to start at its next restart (`Unknown config field` / `Extra inputs are not permitted`) | Move them to ovcli.conf (`plugin.<harness>`, `url`) and delete them from ov.conf. Ignore only if this ov.conf never starts a server. |
-| `nothing listens on port … — the server is not running` | Server down or never started; a stale `.openviking.pid` means it died | Start it (`openviking-server`; first time `openviking-server init`) in a terminal and read the startup output. Ask before restarting a server the user runs. |
+| `ov.conf has a top-level '<harness>' block` / `server.url is rejected` | Plugin-only keys in the server's own config — a top-level block named after any harness (`claude_code`, `codex`, `cursor`, `trae`, `trae_cn`, `zcode`, `opencode`, `dsh`, `pi`) plus `server.url`; the server refuses to start at its next restart (`Unknown config field` / `Extra inputs are not permitted`) | Move them to ovcli.conf (`plugin.<harness>`, `url`) and delete them from ov.conf. Ignore only if this ov.conf never starts a server. |
+| `nothing listens on port … — the server is not running` | Server down or never started; the presence of `.openviking.lock` does not indicate whether the server is running | Start it (`openviking-server`; first time `openviking-server init`) in a terminal and read the startup output. Ask before restarting a server the user runs. |
 | `/ready: embedding → error …` | The running server cannot call its embedding provider: recall searches nothing, commits extract nothing | Fix `embedding.*` (api_key/api_base/model) in ov.conf and restart; `openviking-server doctor` prints the provider's reply. |
 | `/ready: vectordb → …` / `/ready: agfs → …` | Storage broken: disk full, two servers on one workspace, corrupted index | Server log; stop the duplicate; free disk. |
 | `server is still initializing (503 /ready)` | First start downloads a local embedding model, or init is slow | Wait and rerun; if it never finishes, the server log. |
@@ -146,10 +144,6 @@ same `~/.openviking/ovcli.conf` (they show account/user/role for the key).
 `ov config list` reveals whether a different profile was switched in with
 `ov config switch` — that also retargets the plugin.
 
-Recall corpus probe: `node ${CLAUDE_PLUGIN_ROOT}/scripts/debug-recall.mjs "<query>"`
-prints config, health and raw `/search/find` hits. It is a connectivity and
-corpus check, not a replay of the hook's exact ranking.
-
 Server side (only meaningful when the server runs on this machine):
 
 ```bash
@@ -190,8 +184,6 @@ ask before stopping or restarting it.
 
 - Never print a full API key or the raw contents of `ovcli.conf`; the
   doctor's masked forms are the limit.
-- Never run `scripts/debug-capture.mjs` with a live Claude Code session id —
-  it overwrites that session's capture cursor and uses an obsolete API flow.
 - `scripts/setup.mjs` needs a TTY and, on older plugin versions, an existing
   `ovcli.conf`; on a fresh machine write the file directly or re-run the installer.
 - Never pipe `claude plugin list` into `grep -q`; capture the output first

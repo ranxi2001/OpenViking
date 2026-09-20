@@ -36,7 +36,7 @@ The server reads the file at startup. Restart the server after changing models, 
 }
 ```
 
-Optional sections use their defaults when omitted. Unknown fields are rejected.
+Optional sections use their defaults when omitted. Unknown fields in `ov.conf` and persisted account settings are ignored for upgrade compatibility. Known fields still validate types and values; misspelled field names are also ignored.
 
 ## Top-Level Settings
 
@@ -50,6 +50,7 @@ Optional sections use their defaults when omitted. Unknown fields are rejected.
 | `rerank` | object | disabled | Retrieval result reranking |
 | `retrieval` | object | see below | Ranking and intent-analysis behavior |
 | `grep` | object | built-in defaults | Text search engine |
+| `glob` | object | built-in defaults | Path glob engine |
 | `storage` | object | local | Workspace, file system, and vector database |
 | `queue_workers` | object | see below | Runtime concurrency for QueueFS consumer workers |
 | `server` | object | local development | HTTP, authentication, uploads, and observability |
@@ -57,6 +58,7 @@ Optional sections use their defaults when omitted. Unknown fields are rejected.
 | `parsers` | object | parser defaults | PDF, code, image, audio, video, and text parsing |
 | `semantic` | object | built-in defaults | Abstract and overview generation limits |
 | `parser_api` | object | disabled | Third-party file parser API |
+| `compile_api` | object | disabled | External Compile task API |
 | `connector` | object | disabled | External Connector ingestion service |
 | `encryption` | object | disabled | File and secret encryption |
 | `git` | object | local | Version backend: `local` or `s3` |
@@ -225,6 +227,23 @@ This setting controls queue-job concurrency. It is separate from `vlm.media.max_
 |---|---|---:|---|
 | `max_concurrent` | integer | `8` | Number of SessionCommit jobs consumed concurrently; must be greater than `0`; requires a server restart after changes |
 
+### `queue_workers.external_task`
+
+| Field | Type | Default | Description |
+|---|---|---:|---|
+| `max_concurrent` | integer | `10` | Number of external asynchronous tasks consumed concurrently; must be greater than `0`; requires a server restart after changes |
+
+## Compile API Settings
+
+| Field | Type | Default | Description |
+|---|---|---:|---|
+| `base_url` | string | `""` | External service base URL, including `http://` or `https://`; a non-empty value enables external Compile |
+| `gateway_token` | string | `""` | Optional service credential used by OV to call the Compile Gateway |
+| `http_timeout_seconds` | number | `10` | Timeout for one HTTP request |
+| `poll_interval_ms` | integer | `30000` | External task polling interval |
+
+When `base_url` is configured, OV sends the current user's OV API key in `X-API-Key`. It sends `X-Gateway-Token` only when `gateway_token` is configured.
+
 ## Reindex Settings
 
 ### `reindex`
@@ -241,6 +260,7 @@ This setting controls queue-job concurrency. It is separate from `vlm.media.max_
     "host": "127.0.0.1",
     "port": 1933,
     "workers": 1,
+    "executor_threads": 0,
     "auth_mode": "dev",
     "cors_origins": ["http://localhost:5173"],
     "profile_enabled": false,
@@ -258,6 +278,7 @@ This setting controls queue-job concurrency. It is separate from `vlm.media.max_
 | `host` | IP / hostname | `"127.0.0.1"` | Listen address |
 | `port` | integer | `1933` | Listen port |
 | `workers` | integer | `1` | Worker process count |
+| `executor_threads` | non-negative integer | `0` | Maximum threads in each worker process's default asyncio executor; `0` uses Python's default sizing policy |
 | `timeout_keep_alive` | integer (seconds) | `5` | Idle HTTP keep-alive timeout; raise it above the upstream's idle-connection lifetime |
 | `auth_mode` | `dev`, `api_key`, `trusted` / `null` | `null` | Auth mode; null is inferred from `root_api_key` |
 | `root_api_key` | string / `null` | `null` | Root key; setting it defaults auth to `api_key` |
@@ -310,9 +331,7 @@ See [Encryption](../guides/08-encryption.md) for provider and key-management set
     "prefetch_search_topn": 5,
     "extraction_enabled": true,
     "session_skill_extraction_enabled": false,
-    "link_enabled": false,
-    "v2_lock_retry_interval_seconds": 0.2,
-    "v2_lock_max_retries": 0
+    "link_enabled": false
   }
 }
 ```
@@ -328,8 +347,6 @@ See [Encryption](../guides/08-encryption.md) for provider and key-management set
 | `extraction_enabled` | boolean | `true` | Extract long-term memories on session commit |
 | `session_skill_extraction_enabled` | boolean | `false` | Also extract reusable skills |
 | `link_enabled` | boolean | `false` | Generate and resolve memory links |
-| `v2_lock_retry_interval_seconds` | number, `>= 0` | `0.2` | Memory-lock retry interval |
-| `v2_lock_max_retries` | integer, `>= 0` | `0` | Retry limit; `0` means unlimited |
 
 ## Parser Settings
 
