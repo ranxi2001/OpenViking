@@ -81,30 +81,18 @@ class OpenAIVLM(VLMBase):
         self._async_client_cache = LoopScopedAsyncClientCache()
         self.api_version = config.get("api_version")
         self.reasoning_effort = config.get("reasoning_effort")
+        self.keepalive_expiry = config.get("keepalive_expiry")
 
-    def _http_limits(self) -> httpx.Limits:
-        defaults = openai.DEFAULT_CONNECTION_LIMITS
-        if self.keepalive_expiry is None:
-            return defaults
-        return httpx.Limits(
-            max_connections=defaults.max_connections,
-            max_keepalive_connections=defaults.max_keepalive_connections,
-            keepalive_expiry=self.keepalive_expiry,
-        )
-
-    def _configure_sync_http_client(self, kwargs: Dict[str, Any]) -> None:
+    def _http_client_kwargs(self) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"timeout": self.timeout}
         if self.keepalive_expiry is not None:
-            kwargs["http_client"] = openai.DefaultHttpxClient(
-                limits=self._http_limits(),
-                timeout=self.timeout,
+            defaults = openai.DEFAULT_CONNECTION_LIMITS
+            kwargs["limits"] = httpx.Limits(
+                max_connections=defaults.max_connections,
+                max_keepalive_connections=defaults.max_keepalive_connections,
+                keepalive_expiry=self.keepalive_expiry,
             )
-
-    def _configure_async_http_client(self, kwargs: Dict[str, Any]) -> None:
-        if self.keepalive_expiry is not None:
-            kwargs["http_client"] = openai.DefaultAsyncHttpxClient(
-                limits=self._http_limits(),
-                timeout=self.timeout,
-            )
+        return kwargs
 
     def get_client(self):
         """Get sync client"""
@@ -119,16 +107,16 @@ class OpenAIVLM(VLMBase):
                 self.extra_headers,
                 self.timeout,
             )
+            http_kwargs = self._http_client_kwargs()
             http_client = create_optional_sync_httpx_client(
                 self.api_base,
                 client_cls=openai.DefaultHttpxClient,
-                timeout=self.timeout,
-                limits=self._http_limits(),
+                **http_kwargs,
             )
+            if http_client is None and self.keepalive_expiry is not None:
+                http_client = openai.DefaultHttpxClient(**http_kwargs)
             if http_client is not None:
                 kwargs["http_client"] = http_client
-            else:
-                self._configure_sync_http_client(kwargs)
             if self.provider == "azure":
                 self._sync_client = openai.AzureOpenAI(**kwargs)
             else:
@@ -147,16 +135,16 @@ class OpenAIVLM(VLMBase):
             self.extra_headers,
             self.timeout,
         )
+        http_kwargs = self._http_client_kwargs()
         http_client = create_optional_async_httpx_client(
             self.api_base,
             client_cls=openai.DefaultAsyncHttpxClient,
-            timeout=self.timeout,
-            limits=self._http_limits(),
+            **http_kwargs,
         )
+        if http_client is None and self.keepalive_expiry is not None:
+            http_client = openai.DefaultAsyncHttpxClient(**http_kwargs)
         if http_client is not None:
             kwargs["http_client"] = http_client
-        else:
-            self._configure_async_http_client(kwargs)
         if self.provider == "azure":
             return openai.AsyncAzureOpenAI(**kwargs)
         return openai.AsyncOpenAI(**kwargs)
@@ -165,11 +153,10 @@ class OpenAIVLM(VLMBase):
         """Get an async client scoped to the current event loop."""
         return self._async_client_cache.get(self._build_async_client)
 
-    def close(self):
+    def close(self) -> None:
         """Close clients and HTTP transports owned by this backend."""
-        close_sync_client = getattr(self._sync_client, "close", None)
-        if close_sync_client is not None:
-            close_sync_client()
+        if self._sync_client is not None:
+            self._sync_client.close()
         self._async_client_cache.close_all_with_close()
 
     def _supports_enable_thinking(self) -> bool:
