@@ -10,6 +10,10 @@ from test_fakes import fake_request_context
 
 from openviking.session.memory.dataclass import MemoryFile, StoredLink
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
+from openviking.session.skill.session_skill_context_provider import (
+    SESSION_SKILL_MEMORY_TYPE,
+    load_skill_extract_registry,
+)
 from openviking.session.train import (
     ContentHashPolicySnapshotter,
     DryRunPolicyUpdater,
@@ -718,7 +722,10 @@ async def test_patch_merge_policy_optimizer_runs_patch_merge_extract_loop(monkey
                 [],
             )
 
-    monkeypatch.setattr("openviking.session.train.components.policy_optimizer.ExtractLoop", FakeExtractLoop)
+    monkeypatch.setattr(
+        "openviking.session.train.components.policy_optimizer.ExtractLoop",
+        FakeExtractLoop,
+    )
 
     plan = await PatchMergePolicyOptimizer(viking_fs=FakeVikingFS({}), vlm=object()).plan(
         [gradient],
@@ -1074,3 +1081,221 @@ async def test_patch_merge_policy_optimizer_runs_llm_for_single_patch(monkeypatc
     assert captured["constructed"] is True
     assert plan.metadata["patch_gradient_count"] == 1
     assert plan.items[0].after_content == "merged update"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing", [False, True], ids=["create", "update"])
+async def test_patch_merge_policy_optimizer_uses_session_skill_registry(monkeypatch, existing):
+    from openviking.core.skill_loader import SkillLoader
+    from openviking.session.memory.dataclass import (
+        ResolvedOperation,
+        ResolvedOperations,
+    )
+    from openviking.session.train.components.skill_policy_updater import SkillPolicyUpdater
+
+    skill_uri = "viking://user/u/skills/code-review/SKILL.md"
+    old_skill = {
+        "name": "code-review",
+        "description": "Old description",
+        "content": "Old content.",
+    }
+
+    class SkillFS(FakeVikingFS):
+        async def search(self, *args, **kwargs):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(to_dict=lambda: {"memories": [], "resources": [], "skills": []})
+
+        async def read_file(self, uri, ctx=None):
+            if uri not in self.files:
+                raise FileNotFoundError(uri)
+            return self.files[uri]
+
+    fs = SkillFS({skill_uri: SkillLoader.to_skill_md(old_skill)} if existing else {})
+
+    class FakeProcessor:
+        async def process_skill(self, *, data, **kwargs):
+            await fs.write_file(skill_uri, SkillLoader.to_skill_md(data))
+            return {"root_uri": skill_uri.removesuffix("/SKILL.md")}
+
+        async def sanitize_skill_privacy(self, skill, ctx):
+            return skill
+
+    class FakeWriter:
+        def __init__(self, viking_fs):
+            assert viking_fs is fs
+
+        async def write(self, *, uri, content, **kwargs):
+            await fs.write_file(uri, content)
+            return {}
+
+    monkeypatch.setattr(
+        "openviking.session.skill.skill_operation_updater.ContentWriteCoordinator", FakeWriter
+    )
+    policy_set = ExperienceSet(
+        root_uri="viking://user/u/skills",
+        policies=[
+            Experience(
+                name=old_skill["name"],
+                uri=skill_uri,
+                version=1,
+                status="production",
+                content=old_skill["content"],
+                metadata={"description": old_skill["description"]},
+            )
+        ]
+        if existing
+        else [],
+    )
+    gradient = PatchSemanticGradient(
+        before_file=None,
+        after_file=MemoryFile(
+            uri=skill_uri,
+            content="Use this skill to review code changes.",
+            memory_type=SESSION_SKILL_MEMORY_TYPE,
+            extra_fields={
+                "memory_type": SESSION_SKILL_MEMORY_TYPE,
+                "skill_name": "code-review",
+            },
+        ),
+        base_version=None,
+        rationale="test",
+        links=[],
+        confidence=0.9,
+        metadata={},
+    )
+    captured = {}
+
+    class FakeExtractLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self):
+            return (
+                ResolvedOperations(
+                    upsert_operations=[
+                        ResolvedOperation(
+                            old_memory_file_content=None,
+                            memory_fields={
+                                "skill_name": "code-review",
+                                "description": "Review code changes",
+                                "content": "Merged skill content.",
+                            },
+                            memory_type=SESSION_SKILL_MEMORY_TYPE,
+                            uris=[skill_uri],
+                        )
+                    ],
+                    delete_file_contents=[],
+                    errors=[],
+                ),
+                [],
+            )
+
+    monkeypatch.setattr(
+        "openviking.session.train.components.policy_optimizer.ExtractLoop",
+        FakeExtractLoop,
+    )
+
+    plan = await PatchMergePolicyOptimizer(
+        viking_fs=fs,
+        vlm=object(),
+        memory_type=SESSION_SKILL_MEMORY_TYPE,
+        memory_registry=load_skill_extract_registry(),
+    ).plan(
+        [gradient],
+        policy_set,
+        PatchMergePolicyOptimizerContext(request_context=fake_request_context()),
+    )
+
+    assert captured["isolation_handler"].allowed_memory_types == {SESSION_SKILL_MEMORY_TYPE}
+    assert len(plan.items) == 1
+    assert plan.items[0].memory_type == SESSION_SKILL_MEMORY_TYPE
+    assert plan.items[0].target_name == "code-review"
+    assert plan.items[0].target_uri == skill_uri
+    assert plan.items[0].after_content == "Merged skill content."
+
+    result = await SkillPolicyUpdater(skill_processor=FakeProcessor(), viking_fs=fs).apply(
+        plan, policy_set, fake_request_context()
+    )
+    assert result.errors == []
+    assert result.written_uris == [skill_uri]
+    saved = SkillLoader.parse(await fs.read_file(skill_uri))
+    assert saved["description"] == "Review code changes"
+    assert saved["content"] == "Merged skill content."
+    assert result.updated_policy_set.policies[0].metadata["description"] == saved["description"]
+    if existing:
+        assert policy_set.policies[0].metadata["description"] == "Old description"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locked", [False, True], ids=["standalone", "outer-tree-lock"])
+async def test_skill_policy_creation_preserves_lock_ownership(tmp_path, monkeypatch, locked):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from openviking.core.skill_loader import SkillLoader
+    from openviking.server.identity import RequestContext, Role
+    from openviking.session.train.components.skill_policy_updater import SkillPolicyUpdater
+    from openviking.session.train.domain import PolicyPlanItem
+    from openviking.storage.viking_fs import VikingFS
+    from openviking.utils.agfs_utils import RagfsBindingConfig, create_agfs_client
+    from openviking.utils.skill_processor import SkillProcessor
+    from openviking_cli.session.user_id import UserIdentifier
+    from openviking_cli.utils.config.agfs_config import AGFSConfig
+
+    agfs = create_agfs_client(RagfsBindingConfig(agfs=AGFSConfig(path=str(tmp_path))))
+    fs = VikingFS(agfs=agfs)
+    ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role(Role.ROOT))
+    root = "viking://user/default/skills"
+    uri = f"{root}/code-review/SKILL.md"
+    processor = SkillProcessor(vikingdb=AsyncMock())
+    queue = SimpleNamespace(enqueue=AsyncMock())
+    manager = SimpleNamespace(SEMANTIC="Semantic", get_queue=lambda *args, **kwargs: queue)
+    monkeypatch.setattr("openviking.storage.queuefs.get_queue_manager", lambda: manager)
+    policy_set = ExperienceSet(root_uri=root, policies=[], viking_fs=fs, request_context=ctx)
+    updater = SkillPolicyUpdater(skill_processor=processor, viking_fs=fs)
+    plan = PolicyUpdatePlan(
+        items=[
+            PolicyPlanItem(
+                kind="upsert",
+                memory_type=SESSION_SKILL_MEMORY_TYPE,
+                target_name="code-review",
+                target_uri=uri,
+                before_content=None,
+                after_content="Review steps.",
+                metadata={"merge_memory_fields": {"description": "Review code changes"}},
+            )
+        ]
+    )
+    try:
+        async with policy_set.lock() if locked else nullcontext() as lease:
+            result = await updater.apply(plan, policy_set, ctx, transaction_handle=lease)
+            assert result.errors == []
+            assert result.written_uris == [uri]
+            assert SkillLoader.parse(await fs.read_file(uri, ctx=ctx))["content"] == "Review steps."
+            for filename in (".abstract.md", ".overview.md"):
+                assert await fs.read_file(f"{root}/code-review/{filename}", ctx=ctx)
+            if locked:
+                # The callee must not release the caller's tree lock.
+                with pytest.raises(LockAcquisitionError):
+                    await fs._async_agfs.pathlock_acquire_exact(fs._uri_to_path(uri, ctx=ctx))
+        # Queued indexing keeps its own package lease after the caller exits.
+        with pytest.raises(LockAcquisitionError):
+            await fs._async_agfs.pathlock_acquire_exact(fs._uri_to_path(uri, ctx=ctx))
+        msg = queue.enqueue.await_args.args[0]
+        worker_lease = await fs._async_agfs.pathlock_adopt(msg.lock_handoff)
+        await fs._async_agfs.pathlock_release(worker_lease)
+        lease = await fs._async_agfs.pathlock_acquire_tree(fs._uri_to_path(root, ctx=ctx))
+        await fs._async_agfs.pathlock_release(lease)
+    finally:
+        from openviking.telemetry import unregister_telemetry
+        from openviking.telemetry.request_wait_tracker import get_request_wait_tracker
+
+        if queue.enqueue.await_args:
+            msg = queue.enqueue.await_args.args[0]
+            tracker = get_request_wait_tracker()
+            tracker.mark_semantic_done(msg.telemetry_id, msg.id)
+            tracker.cleanup(msg.telemetry_id)
+            unregister_telemetry(msg.telemetry_id)
+        agfs.close()

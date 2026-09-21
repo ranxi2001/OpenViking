@@ -195,6 +195,9 @@ async def client_with_resource_and_blob(client_with_resource, service):
 async def test_restore_acl_and_reindex_identity(client_with_resource, service, monkeypatch):
     _, _root = client_with_resource
     admin = RequestContext(user=service.user, role=Role.ADMIN)
+    await service.runtime_config_manager.patch_account(
+        admin.account_id, {"acl": {"enabled": True}}
+    )
     writer = RequestContext(
         user=UserIdentifier(admin.account_id, "snapshot_writer"),
         role=Role.USER,

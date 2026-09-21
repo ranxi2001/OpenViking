@@ -58,6 +58,10 @@ each caller.
 
 Moving away from traditional flat database thinking, all context is organized as a filesystem. Agents no longer just find data through vector search, but can locate and browse data through deterministic paths and standard filesystem commands. Each context or directory is assigned a unique URI identifier string in the format viking://{scope}/{path}, allowing the system to precisely locate and access resources stored in different locations.
 
+## File IDs
+
+In addition to its URI, every file is automatically assigned a stable `id` that serves as the primary key of its vector record in VikingDB. The id is deterministically computed as `md5(f"{account_id}:{uri}")` for level 2 (regular file) records, and is returned by `stat()` and other metadata APIs. This allows callers to cross-reference vector index entries without a separate lookup. The id is scoped to the account and changes if the file is moved to a different URI (vector records are re-keyed during URI migration). Directories do not expose a single `id` because a directory may span multiple semantic levels (L0 abstract, L1 overview, L2), each with its own record.
+
 ```
 viking://
 ├── user/
@@ -139,9 +143,10 @@ viking://agent/tools/mcp/                           # MCP tool configuration (pl
 viking://agent/payments/ap2/                        # Payment configuration (planned)
 ```
 
-`viking://agent/...` is a global shared scope, accessible to all users under the account,
-without agent_id isolation. Legacy (0.3.x) data under `viking://agent/...` remains accessible
-via a read-only compatibility entry, but new data should be written according to the new directory semantics.
+`viking://agent/...` is an account-shared directory for capabilities and configuration,
+including skills, endpoints, tools, payments, and other subdirectories. Directory names
+do not identify agents, and `actor_peer_id` does not filter this scope. Sharing is limited
+to the current account. Peer data belongs under `viking://user/<user_id>/peers/<peer_id>/...`.
 
 The home alias `viking://~/...` is relative to the current request identity. OpenViking
 expands it internally to the explicit namespace path `viking://user/{user_id}/...` before
@@ -280,9 +285,9 @@ viking://
     └── history/
 ```
 
-`viking://agent/...` is a global shared scope for agent capabilities, accessible to all users under the account,
-without agent_id isolation. Legacy (0.3.x) data under `viking://agent/...` remains accessible
-via a read-only compatibility entry, but new data should be written according to the new directory semantics.
+`viking://agent/...` is an account-shared directory without an Agent ID identity layer.
+`actor_peer_id` filters only the current user's `peers` collection. Shared directories
+remain isolated by account.
 
 ## URI Operations
 
